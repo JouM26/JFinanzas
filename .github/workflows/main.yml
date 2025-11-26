@@ -1,25 +1,49 @@
-name: Build APK
-on: [push]
+on:
+  push:
+    branches:
+      - main
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v3
+    # 1. Descargar tu código
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 2. Instalar Java (Necesario para Android)
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    # 3. Instalar Python
     - name: Setup Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-    - name: Install dependencies
-      run: pip install flet
-    - name: Flet Build APK
-      uses: flet-dev/flet-action@v1 # Esta es la herramienta oficial de Flet
+
+    # 4. Instalar Flutter (Motor gráfico)
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
       with:
-        target: main.py
-        output: build/app-release.apk
-        # Opciones extra si las necesitas:
-        # icon: assets/icon.png
+        channel: stable
+
+    # 5. Instalar Flet y dependencias
+    - name: Install Dependencies
+      run: |
+        pip install flet
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    # 6. Compilar la APK
+    - name: Build APK
+      run: flet build apk --verbose
+
+    # 7. Subir el resultado para que lo descargues
     - name: Upload APK
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: mi-finanzas-app
-        path: build/app-release.apk
+        name: app-finanzas-release
+        path: build/apk/app-release.apk
