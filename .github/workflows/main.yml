@@ -1,0 +1,25 @@
+name: Build APK
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    - name: Install dependencies
+      run: pip install flet
+    - name: Flet Build APK
+      uses: flet-dev/flet-action@v1 # Esta es la herramienta oficial de Flet
+      with:
+        target: main.py
+        output: build/app-release.apk
+        # Opciones extra si las necesitas:
+        # icon: assets/icon.png
+    - name: Upload APK
+      uses: actions/upload-artifact@v3
+      with:
+        name: mi-finanzas-app
+        path: build/app-release.apk
