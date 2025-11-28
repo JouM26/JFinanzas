@@ -1,6 +1,9 @@
 import flet as ft
 import sqlite3
 import datetime
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+import os
 
 # --- Lógica de Base de Datos (SQLite) ---
 class Database:
@@ -134,6 +137,21 @@ class Database:
         except Exception as e:
             print(f"Error al obtener balance mensual: {e}")
             return 0, 0
+    
+    def obtener_movimientos_mensuales(self, mes, anio):
+        """Obtiene todos los movimientos de un mes específico"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT id, tipo, categoria, monto, descripcion, fecha 
+                FROM movimientos 
+                WHERE strftime('%m', fecha) = ? AND strftime('%Y', fecha) = ?
+                ORDER BY fecha DESC
+            """, (f"{mes:02d}", str(anio)))
+            return cursor.fetchall()
+        except Exception as e:
+            print(f"Error al obtener movimientos mensuales: {e}")
+            return []
     
     # --- Métodos para Suscripciones ---
     
@@ -563,7 +581,8 @@ def main(page: ft.Page):
     dropdown_tipo = ft.Dropdown(
         label="Tipo",
         options=[ft.dropdown.Option("gasto"), ft.dropdown.Option("ingreso")],
-        value="gasto"
+        value="gasto",
+        on_change=lambda e: actualizar_opciones_destino()
     )
     dropdown_cat = ft.Dropdown(
         label="Categoría",
@@ -580,6 +599,50 @@ def main(page: ft.Page):
         ],
         value="Comida"
     )
+    dropdown_destino_movimiento = ft.Dropdown(
+        label="Método de pago",
+        options=[
+            ft.dropdown.Option("efectivo", "💵 Efectivo"),
+            ft.dropdown.Option("banco", "🏦 Banco")
+        ],
+        value="efectivo",
+        visible=True,
+        on_change=lambda e: actualizar_selector_banco()
+    )
+    dropdown_banco_movimiento = ft.Dropdown(
+        label="Selecciona el banco",
+        options=[],
+        visible=False
+    )
+    
+    def actualizar_opciones_destino():
+        """Actualiza las etiquetas y opciones según el tipo de movimiento"""
+        es_ingreso = dropdown_tipo.value == "ingreso"
+        
+        # Cambiar la etiqueta según el tipo
+        if es_ingreso:
+            dropdown_destino_movimiento.label = "Destino del ingreso"
+        else:
+            dropdown_destino_movimiento.label = "Método de pago"
+        
+        dropdown_banco_movimiento.visible = False
+        
+        # Obtener bancos disponibles
+        cuentas = db.obtener_cuentas_bancarias()
+        opciones = []
+        for cuenta in cuentas:
+            id_cuenta, nombre_banco, tipo_cuenta, saldo, limite_credito, fecha_creacion, activa = cuenta
+            opciones.append(ft.dropdown.Option(f"banco_{id_cuenta}", f"{nombre_banco} ({tipo_cuenta})"))
+        dropdown_banco_movimiento.options = opciones
+        if opciones:
+            dropdown_banco_movimiento.value = opciones[0].key
+        
+        page.update()
+    
+    def actualizar_selector_banco():
+        """Muestra el selector de banco solo si se elige 'banco'"""
+        dropdown_banco_movimiento.visible = dropdown_destino_movimiento.value == "banco"
+        page.update()
 
     # --- Funciones de Lógica ---
 
@@ -1151,6 +1214,114 @@ def main(page: ft.Page):
         
         return ft.Column([header, lista_bancos], spacing=0, expand=True)
     
+    def exportar_movimientos_a_excel(mes, anio):
+        """Exporta los movimientos mensuales a un archivo Excel"""
+        try:
+            # Obtener datos
+            movimientos = db.obtener_movimientos_mensuales(mes, anio)
+            ingresos_mes, gastos_mes = db.obtener_balance_mensual(mes, anio)
+            total_subs = db.obtener_total_suscripciones()
+            total_cuotas = db.obtener_total_cuotas_prestamos()
+            total_cuotas_creditos = db.obtener_total_cuotas_creditos()
+            balance_mes = ingresos_mes - gastos_mes
+            
+            meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
+                    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+            mes_nombre = meses[mes - 1]
+            
+            # Crear libro de Excel
+            wb = Workbook()
+            ws = wb.active
+            ws.title = f"{mes_nombre} {anio}"
+            
+            # Estilos
+            header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+            header_font = Font(bold=True, color="FFFFFF", size=12)
+            title_font = Font(bold=True, size=14)
+            
+            # Título
+            ws.merge_cells('A1:E1')
+            ws['A1'] = f"Reporte de Movimientos - {mes_nombre} {anio}"
+            ws['A1'].font = title_font
+            ws['A1'].alignment = Alignment(horizontal='center')
+            
+            # Resumen
+            ws['A3'] = "RESUMEN DEL MES"
+            ws['A3'].font = Font(bold=True, size=12)
+            
+            ws['A4'] = "Total Ingresos:"
+            ws['B4'] = f"${ingresos_mes:,.2f}"
+            ws['B4'].font = Font(color="008000", bold=True)
+            
+            ws['A5'] = "Total Gastos:"
+            ws['B5'] = f"${gastos_mes:,.2f}"
+            ws['B5'].font = Font(color="FF0000", bold=True)
+            
+            ws['A6'] = "Suscripciones:"
+            ws['B6'] = f"${total_subs:,.2f}"
+            
+            ws['A7'] = "Cuotas Préstamos:"
+            ws['B7'] = f"${total_cuotas:,.2f}"
+            
+            ws['A8'] = "Cuotas Créditos:"
+            ws['B8'] = f"${total_cuotas_creditos:,.2f}"
+            
+            ws['A9'] = "Balance Final:"
+            ws['B9'] = f"${balance_mes:,.2f}"
+            ws['B9'].font = Font(bold=True, size=12)
+            
+            # Encabezados de movimientos
+            ws['A11'] = "Fecha"
+            ws['B11'] = "Tipo"
+            ws['C11'] = "Categoría"
+            ws['D11'] = "Descripción"
+            ws['E11'] = "Monto"
+            
+            for cell in ['A11', 'B11', 'C11', 'D11', 'E11']:
+                ws[cell].fill = header_fill
+                ws[cell].font = header_font
+                ws[cell].alignment = Alignment(horizontal='center')
+            
+            # Datos de movimientos
+            fila = 12
+            for mov in movimientos:
+                id_mov, tipo, categoria, monto, descripcion, fecha = mov
+                
+                ws[f'A{fila}'] = fecha
+                ws[f'B{fila}'] = tipo.upper()
+                ws[f'C{fila}'] = categoria
+                ws[f'D{fila}'] = descripcion
+                ws[f'E{fila}'] = f"${monto:,.2f}"
+                
+                # Colorear según tipo
+                if tipo == 'ingreso':
+                    ws[f'B{fila}'].font = Font(color="008000")
+                    ws[f'E{fila}'].font = Font(color="008000")
+                else:
+                    ws[f'B{fila}'].font = Font(color="FF0000")
+                    ws[f'E{fila}'].font = Font(color="FF0000")
+                
+                fila += 1
+            
+            # Ajustar anchos de columna
+            ws.column_dimensions['A'].width = 20
+            ws.column_dimensions['B'].width = 12
+            ws.column_dimensions['C'].width = 15
+            ws.column_dimensions['D'].width = 30
+            ws.column_dimensions['E'].width = 15
+            
+            # Guardar archivo
+            nombre_archivo = f"Movimientos_{mes_nombre}_{anio}.xlsx"
+            ruta_documentos = os.path.join(os.path.expanduser('~'), 'Documents')
+            ruta_completa = os.path.join(ruta_documentos, nombre_archivo)
+            
+            wb.save(ruta_completa)
+            return True, ruta_completa
+            
+        except Exception as e:
+            print(f"Error al exportar a Excel: {e}")
+            return False, str(e)
+    
     def crear_vista_balance_mensual():
         """Crea la vista de balance mensual"""
         ahora = datetime.datetime.now()
@@ -1165,10 +1336,38 @@ def main(page: ft.Page):
         meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
         mes_nombre = meses[mes_actual - 1]
         
+        def exportar_excel(e):
+            exito, mensaje = exportar_movimientos_a_excel(mes_actual, anio_actual)
+            if exito:
+                page.show_snack_bar(
+                    ft.SnackBar(
+                        content=ft.Text(f"✅ Excel exportado: {mensaje}"),
+                        bgcolor="green",
+                        duration=5000
+                    )
+                )
+            else:
+                page.show_snack_bar(
+                    ft.SnackBar(
+                        content=ft.Text(f"❌ Error: {mensaje}"),
+                        bgcolor="red",
+                        duration=5000
+                    )
+                )
+        
         return ft.Column([
             ft.Container(
                 content=ft.Column([
-                    ft.Text(f"📊 Balance de {mes_nombre} {anio_actual}", size=20, weight=ft.FontWeight.BOLD),
+                    ft.Row([
+                        ft.Text(f"📊 Balance de {mes_nombre} {anio_actual}", size=20, weight=ft.FontWeight.BOLD, expand=True),
+                        ft.IconButton(
+                            icon="download",
+                            icon_color="green",
+                            tooltip="Exportar a Excel",
+                            on_click=exportar_excel,
+                            icon_size=28
+                        )
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                     ft.Divider(height=20, color="transparent"),
                     ft.Container(
                         content=ft.Column([
@@ -1398,11 +1597,24 @@ def main(page: ft.Page):
             monto,
             input_desc.value
         ):
+            # Si usa banco, agregar o retirar el monto de la cuenta
+            if dropdown_destino_movimiento.value == "banco" and dropdown_banco_movimiento.value:
+                # Extraer el ID del banco del valor seleccionado
+                id_cuenta = int(dropdown_banco_movimiento.value.split("_")[1])
+                
+                if dropdown_tipo.value == "ingreso":
+                    # Agregar monto al banco
+                    db.agregar_monto_cuenta(id_cuenta, monto)
+                else:
+                    # Retirar monto del banco (gasto)
+                    db.retirar_monto_cuenta(id_cuenta, monto)
+            
             # Limpiar campos y cerrar diálogo
             input_desc.value = ""
             input_monto.value = ""
             input_desc.error_text = None
             input_monto.error_text = None
+            dropdown_banco_movimiento.visible = False
             bottom_sheet_movimiento.open = False
             actualizar_vista()
         else:
@@ -1836,6 +2048,8 @@ def main(page: ft.Page):
                 [
                     ft.Text("💸 Agregar Movimiento", size=20, weight=ft.FontWeight.BOLD),
                     dropdown_tipo,
+                    dropdown_destino_movimiento,
+                    dropdown_banco_movimiento,
                     dropdown_cat,
                     input_desc,
                     input_monto,
@@ -2238,6 +2452,9 @@ def main(page: ft.Page):
             input_monto.error_text = None
             dropdown_tipo.value = "gasto"
             dropdown_cat.value = "Comida"
+            dropdown_destino_movimiento.value = "efectivo"
+            dropdown_banco_movimiento.visible = False
+            actualizar_opciones_destino()
             bottom_sheet_movimiento.open = True
         
         page.update()
