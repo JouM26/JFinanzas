@@ -2253,13 +2253,13 @@ def main(page: ft.Page):
     # Barra de navegación inferior
     page.navigation_bar = ft.NavigationBar(
         destinations=[
-            ft.NavigationBarDestination(icon="home", label="Inicio"),
-            ft.NavigationBarDestination(icon="subscriptions", label="Suscripciones"),
-            ft.NavigationBarDestination(icon="account_balance", label="Préstamos"),
-            ft.NavigationBarDestination(icon="credit_card", label="Créditos"),
-            ft.NavigationBarDestination(icon="savings", label="Ahorros"),
-            ft.NavigationBarDestination(icon="account_balance_wallet", label="Bancos"),
-            ft.NavigationBarDestination(icon="bar_chart", label="Balance"),
+            ft.NavigationBarDestination(icon="home"),
+            ft.NavigationBarDestination(icon="subscriptions"),
+            ft.NavigationBarDestination(icon="account_balance"),
+            ft.NavigationBarDestination(icon="credit_card"),
+            ft.NavigationBarDestination(icon="savings"),
+            ft.NavigationBarDestination(icon="account_balance_wallet"),
+            ft.NavigationBarDestination(icon="bar_chart"),
         ],
         on_change=cambiar_vista,
         selected_index=0
