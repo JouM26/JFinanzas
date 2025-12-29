@@ -4,15 +4,38 @@ import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 import os
+import pathlib
+import platform
+import hashlib
+import json
 
 # --- Lógica de Base de Datos (SQLite) ---
 class Database:
-    def __init__(self):
-        self.conn = sqlite3.connect("finanzas.db", check_same_thread=False)
+    def __init__(self, db_path="finanzas.db"):
+        self.db_path = db_path
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.create_table()
 
     def create_table(self):
         cursor = self.conn.cursor()
+        # Tabla de configuración de la app
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS configuracion (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clave TEXT UNIQUE NOT NULL,
+                valor TEXT
+            )
+        """)
+        # Tabla de presupuestos por categoría
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS presupuestos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                categoria TEXT UNIQUE NOT NULL,
+                limite REAL NOT NULL,
+                mes INTEGER,
+                anio INTEGER
+            )
+        """)
         # Tabla de movimientos (solo personal)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS movimientos (
@@ -85,7 +108,381 @@ class Database:
                 activa INTEGER DEFAULT 1  -- 1=activa, 0=inactiva
             )
         """)
+        # Tabla de transferencias entre cuentas
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS transferencias (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cuenta_origen INTEGER,
+                cuenta_destino INTEGER,
+                monto REAL NOT NULL,
+                fecha TEXT,
+                descripcion TEXT,
+                FOREIGN KEY (cuenta_origen) REFERENCES cuentas_bancarias(id),
+                FOREIGN KEY (cuenta_destino) REFERENCES cuentas_bancarias(id)
+            )
+        """)
         self.conn.commit()
+    
+    # --- Métodos de Configuración ---
+    
+    def obtener_config(self, clave, default=None):
+        """Obtiene un valor de configuración"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT valor FROM configuracion WHERE clave = ?", (clave,))
+            result = cursor.fetchone()
+            return result[0] if result else default
+        except:
+            return default
+    
+    def guardar_config(self, clave, valor):
+        """Guarda un valor de configuración"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO configuracion (clave, valor) VALUES (?, ?)", (clave, valor))
+            self.conn.commit()
+            return True
+        except:
+            return False
+    
+    def verificar_pin(self, pin):
+        """Verifica si el PIN es correcto"""
+        pin_guardado = self.obtener_config("pin_hash")
+        if not pin_guardado:
+            return True  # No hay PIN configurado
+        pin_hash = hashlib.sha256(pin.encode()).hexdigest()
+        return pin_hash == pin_guardado
+    
+    def guardar_pin(self, pin):
+        """Guarda el PIN encriptado"""
+        pin_hash = hashlib.sha256(pin.encode()).hexdigest()
+        return self.guardar_config("pin_hash", pin_hash)
+    
+    def tiene_pin(self):
+        """Verifica si hay PIN configurado"""
+        return self.obtener_config("pin_hash") is not None
+    
+    def es_primera_vez(self):
+        """Verifica si es la primera vez que se abre la app"""
+        return self.obtener_config("onboarding_completado") != "1"
+    
+    def completar_onboarding(self):
+        """Marca el onboarding como completado"""
+        return self.guardar_config("onboarding_completado", "1")
+    
+    def obtener_tema(self):
+        """Obtiene el tema actual (light/dark)"""
+        return self.obtener_config("tema", "light")
+    
+    def guardar_tema(self, tema):
+        """Guarda el tema seleccionado"""
+        return self.guardar_config("tema", tema)
+    
+    # --- Métodos de Presupuestos ---
+    
+    def agregar_presupuesto(self, categoria, limite):
+        """Agrega o actualiza un presupuesto por categoría"""
+        try:
+            cursor = self.conn.cursor()
+            ahora = datetime.datetime.now()
+            cursor.execute("""
+                INSERT OR REPLACE INTO presupuestos (categoria, limite, mes, anio) 
+                VALUES (?, ?, ?, ?)
+            """, (categoria, limite, ahora.month, ahora.year))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error al agregar presupuesto: {e}")
+            return False
+    
+    def obtener_presupuestos(self):
+        """Obtiene todos los presupuestos"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM presupuestos ORDER BY categoria")
+            return cursor.fetchall()
+        except:
+            return []
+    
+    def obtener_gasto_categoria_mes(self, categoria, mes=None, anio=None):
+        """Obtiene el total gastado en una categoría en un mes"""
+        try:
+            if mes is None:
+                mes = datetime.datetime.now().month
+            if anio is None:
+                anio = datetime.datetime.now().year
+            
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT SUM(monto) FROM movimientos 
+                WHERE tipo = 'gasto' AND categoria = ? 
+                AND strftime('%m', fecha) = ? AND strftime('%Y', fecha) = ?
+            """, (categoria, f"{mes:02d}", str(anio)))
+            result = cursor.fetchone()[0]
+            return result if result else 0
+        except:
+            return 0
+    
+    def borrar_presupuesto(self, id_presupuesto):
+        """Elimina un presupuesto"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM presupuestos WHERE id = ?", (id_presupuesto,))
+            self.conn.commit()
+            return True
+        except:
+            return False
+    
+    # --- Métodos de Transferencias ---
+    
+    def realizar_transferencia(self, cuenta_origen, cuenta_destino, monto, descripcion=""):
+        """Realiza una transferencia entre cuentas"""
+        try:
+            cursor = self.conn.cursor()
+            fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            
+            # Retirar de cuenta origen
+            self.retirar_monto_cuenta(cuenta_origen, monto)
+            # Depositar en cuenta destino
+            self.agregar_monto_cuenta(cuenta_destino, monto)
+            
+            # Registrar la transferencia
+            cursor.execute("""
+                INSERT INTO transferencias (cuenta_origen, cuenta_destino, monto, fecha, descripcion)
+                VALUES (?, ?, ?, ?, ?)
+            """, (cuenta_origen, cuenta_destino, monto, fecha, descripcion))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error en transferencia: {e}")
+            return False
+    
+    def obtener_transferencias(self):
+        """Obtiene el historial de transferencias"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT t.id, c1.nombre_banco, c2.nombre_banco, t.monto, t.fecha, t.descripcion
+                FROM transferencias t
+                LEFT JOIN cuentas_bancarias c1 ON t.cuenta_origen = c1.id
+                LEFT JOIN cuentas_bancarias c2 ON t.cuenta_destino = c2.id
+                ORDER BY t.fecha DESC
+            """)
+            return cursor.fetchall()
+        except:
+            return []
+    
+    # --- Métodos de Estadísticas para Gráficos ---
+    
+    def obtener_gastos_por_categoria(self, mes=None, anio=None):
+        """Obtiene gastos agrupados por categoría"""
+        try:
+            if mes is None:
+                mes = datetime.datetime.now().month
+            if anio is None:
+                anio = datetime.datetime.now().year
+            
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT categoria, SUM(monto) as total
+                FROM movimientos 
+                WHERE tipo = 'gasto' 
+                AND strftime('%m', fecha) = ? AND strftime('%Y', fecha) = ?
+                GROUP BY categoria
+                ORDER BY total DESC
+            """, (f"{mes:02d}", str(anio)))
+            return cursor.fetchall()
+        except:
+            return []
+    
+    def obtener_balance_ultimos_meses(self, num_meses=6):
+        """Obtiene ingresos y gastos de los últimos N meses"""
+        try:
+            resultados = []
+            ahora = datetime.datetime.now()
+            
+            for i in range(num_meses - 1, -1, -1):
+                fecha = ahora - datetime.timedelta(days=i*30)
+                mes = fecha.month
+                anio = fecha.year
+                
+                ingresos, gastos = self.obtener_balance_mensual(mes, anio)
+                resultados.append({
+                    "mes": fecha.strftime("%b"),
+                    "anio": anio,
+                    "ingresos": ingresos,
+                    "gastos": gastos
+                })
+            
+            return resultados
+        except:
+            return []
+    
+    # --- Métodos de Edición ---
+    
+    def editar_movimiento(self, id_mov, tipo, categoria, monto, descripcion):
+        """Edita un movimiento existente"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE movimientos SET tipo = ?, categoria = ?, monto = ?, descripcion = ?
+                WHERE id = ?
+            """, (tipo, categoria, monto, descripcion, id_mov))
+            self.conn.commit()
+            return True
+        except:
+            return False
+    
+    def editar_suscripcion(self, id_sub, nombre, monto, dia_cobro):
+        """Edita una suscripción existente"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE suscripciones SET nombre = ?, monto = ?, dia_cobro = ?
+                WHERE id = ?
+            """, (nombre, monto, dia_cobro, id_sub))
+            self.conn.commit()
+            return True
+        except:
+            return False
+    
+    def editar_prestamo(self, id_pres, banco, monto_total, cuota_mensual, dia_pago):
+        """Edita un préstamo existente"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE prestamos SET banco = ?, monto_total = ?, cuota_mensual = ?, dia_pago = ?
+                WHERE id = ?
+            """, (banco, monto_total, cuota_mensual, dia_pago, id_pres))
+            self.conn.commit()
+            return True
+        except:
+            return False
+    
+    def editar_ahorro(self, id_aho, nombre, meta):
+        """Edita un ahorro existente"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE ahorros SET nombre = ?, meta = ?
+                WHERE id = ?
+            """, (nombre, meta, id_aho))
+            self.conn.commit()
+            return True
+        except:
+            return False
+    
+    def editar_credito(self, id_cred, descripcion, banco, monto_total, meses_plazo, tasa_interes):
+        """Edita un crédito existente"""
+        try:
+            cursor = self.conn.cursor()
+            if tasa_interes > 0:
+                tasa_mensual = tasa_interes / 100
+                cuota_mensual = monto_total * (tasa_mensual * pow(1 + tasa_mensual, meses_plazo)) / (pow(1 + tasa_mensual, meses_plazo) - 1)
+            else:
+                cuota_mensual = monto_total / meses_plazo if meses_plazo > 0 else monto_total
+            
+            cursor.execute("""
+                UPDATE creditos SET descripcion = ?, banco = ?, monto_total = ?, 
+                meses_sin_intereses = ?, cuota_mensual = ?, tasa_interes = ?
+                WHERE id = ?
+            """, (descripcion, banco, monto_total, meses_plazo, cuota_mensual, tasa_interes, id_cred))
+            self.conn.commit()
+            return True
+        except:
+            return False
+    
+    def editar_cuenta_bancaria(self, id_cuenta, nombre_banco, tipo_cuenta, limite_credito):
+        """Edita una cuenta bancaria existente"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE cuentas_bancarias SET nombre_banco = ?, tipo_cuenta = ?, limite_credito = ?
+                WHERE id = ?
+            """, (nombre_banco, tipo_cuenta, limite_credito, id_cuenta))
+            self.conn.commit()
+            return True
+        except:
+            return False
+    
+    # --- Métodos de Búsqueda ---
+    
+    def buscar_movimientos(self, texto="", categoria=None, tipo=None, fecha_desde=None, fecha_hasta=None):
+        """Busca movimientos con filtros"""
+        try:
+            cursor = self.conn.cursor()
+            query = "SELECT * FROM movimientos WHERE 1=1"
+            params = []
+            
+            if texto:
+                query += " AND (descripcion LIKE ? OR categoria LIKE ?)"
+                params.extend([f"%{texto}%", f"%{texto}%"])
+            
+            if categoria:
+                query += " AND categoria = ?"
+                params.append(categoria)
+            
+            if tipo:
+                query += " AND tipo = ?"
+                params.append(tipo)
+            
+            if fecha_desde:
+                query += " AND fecha >= ?"
+                params.append(fecha_desde)
+            
+            if fecha_hasta:
+                query += " AND fecha <= ?"
+                params.append(fecha_hasta)
+            
+            query += " ORDER BY id DESC"
+            cursor.execute(query, params)
+            return cursor.fetchall()
+        except:
+            return []
+    
+    # --- Backup y Restauración ---
+    
+    def exportar_datos(self):
+        """Exporta todos los datos a un diccionario"""
+        try:
+            cursor = self.conn.cursor()
+            datos = {}
+            
+            tablas = ['movimientos', 'suscripciones', 'prestamos', 'ahorros', 'creditos', 'cuentas_bancarias', 'presupuestos']
+            
+            for tabla in tablas:
+                cursor.execute(f"SELECT * FROM {tabla}")
+                columnas = [description[0] for description in cursor.description]
+                filas = cursor.fetchall()
+                datos[tabla] = [dict(zip(columnas, fila)) for fila in filas]
+            
+            return json.dumps(datos, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error al exportar: {e}")
+            return None
+    
+    def importar_datos(self, json_data):
+        """Importa datos desde un JSON"""
+        try:
+            datos = json.loads(json_data)
+            cursor = self.conn.cursor()
+            
+            for tabla, registros in datos.items():
+                for registro in registros:
+                    columnas = ', '.join(registro.keys())
+                    placeholders = ', '.join(['?' for _ in registro])
+                    valores = list(registro.values())
+                    
+                    try:
+                        cursor.execute(f"INSERT OR REPLACE INTO {tabla} ({columnas}) VALUES ({placeholders})", valores)
+                    except:
+                        pass
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error al importar: {e}")
+            return False
 
     def agregar_movimiento(self, tipo, categoria, monto, descripcion):
         try:
@@ -523,29 +920,324 @@ class Database:
         if self.conn:
             self.conn.close()
 
+
+def get_persistent_db_path():
+    """
+    Obtiene una ruta persistente para la base de datos.
+    Esta ruta NO se elimina cuando se actualiza la app.
+    """
+    try:
+        sistema = platform.system().lower()
+        
+        if sistema == 'windows':
+            # Windows: usar AppData/Local
+            app_data_dir = pathlib.Path.home() / "AppData" / "Local" / "JFinanzas"
+        elif sistema == 'darwin':
+            # macOS: usar Application Support
+            app_data_dir = pathlib.Path.home() / "Library" / "Application Support" / "JFinanzas"
+        else:
+            # Linux/Android/iOS: usar carpeta oculta en home
+            # En Android con Flet, esto se mapea al almacenamiento interno de la app
+            app_data_dir = pathlib.Path.home() / ".jfinanzas"
+        
+        app_data_dir.mkdir(parents=True, exist_ok=True)
+        return str(app_data_dir / "finanzas.db")
+    except Exception as e:
+        print(f"Error obteniendo ruta persistente: {e}")
+        return "finanzas.db"
+
+
 # --- Interfaz Gráfica (Flet) ---
 def main(page: ft.Page):
-    # Configuración para móvil
+    # Configuración inicial para móvil
     page.title = "💰 Mis Finanzas"
-    page.theme_mode = ft.ThemeMode.LIGHT
     page.padding = 0
     page.scroll = ft.ScrollMode.AUTO
     
     # Configuración óptima para móvil y PC
     try:
-        # Solo ajustar tamaño en PC, en móvil se adapta automáticamente
         if not page.web:
             page.window_width = 400
             page.window_height = 800
     except:
         pass
     
-    db = Database()
+    # Usar almacenamiento persistente
+    db_path = get_persistent_db_path()
+    print(f"Base de datos en: {db_path}")
+    db = Database(db_path)
+    
+    # Aplicar tema guardado
+    tema_guardado = db.obtener_tema()
+    page.theme_mode = ft.ThemeMode.DARK if tema_guardado == "dark" else ft.ThemeMode.LIGHT
+    
+    # Colores según tema - Paleta oscura moderna y agradable
+    def obtener_colores():
+        es_oscuro = page.theme_mode == ft.ThemeMode.DARK
+        if es_oscuro:
+            return {
+                "fondo": "#0d1117",
+                "tarjeta": "#161b22",
+                "tarjeta_elevada": "#21262d",
+                "texto": "#e6edf3",
+                "texto_secundario": "#8b949e",
+                "borde": "#30363d",
+                "appbar": "#161b22",
+                "input_border": "#30363d",
+                "input_bg": "#0d1117",
+                # Colores de acento para modo oscuro
+                "verde": "#238636",
+                "verde_bg": "#0d1117",
+                "rojo": "#da3633",
+                "rojo_bg": "#0d1117",
+                "naranja": "#d29922",
+                "naranja_bg": "#1c1504",
+                "purple": "#8957e5",
+                "purple_bg": "#1a0d2e",
+                "azul": "#58a6ff",
+                "azul_bg": "#0d1117",
+                "teal": "#3fb950",
+                "teal_bg": "#0d1a0f",
+                "cyan": "#39c5cf",
+                "cyan_bg": "#0a1a1c",
+                "indigo": "#a371f7",
+                "indigo_bg": "#170d2e",
+                "gris_bg": "#21262d",
+            }
+        else:
+            return {
+                "fondo": "white",
+                "tarjeta": "white",
+                "tarjeta_elevada": "#f6f8fa",
+                "texto": "black",
+                "texto_secundario": "grey600",
+                "borde": "#e0e0e0",
+                "appbar": "blue700",
+                "input_border": "blue700",
+                "input_bg": "white",
+                # Colores de acento para modo claro
+                "verde": "green",
+                "verde_bg": "green50",
+                "rojo": "red",
+                "rojo_bg": "red50",
+                "naranja": "orange",
+                "naranja_bg": "orange50",
+                "purple": "purple",
+                "purple_bg": "purple50",
+                "azul": "blue700",
+                "azul_bg": "blue50",
+                "teal": "teal",
+                "teal_bg": "teal50",
+                "cyan": "cyan900",
+                "cyan_bg": "cyan50",
+                "indigo": "indigo",
+                "indigo_bg": "indigo50",
+                "gris_bg": "grey100",
+            }
+    
+    colores = obtener_colores()
     
     # Estado para navegación
-    vista_actual = "inicio"  # "inicio", "suscripciones", "prestamos", "creditos", "ahorros", "bancos", "balance" 
-
-    # --- Componentes de UI ---
+    vista_actual = "inicio"
+    app_desbloqueada = [False]  # Usar lista para poder modificar en funciones anidadas
+    
+    # =====================================================
+    # PANTALLA DE PIN / ONBOARDING
+    # =====================================================
+    
+    contenedor_login = ft.Container(expand=True, visible=True)
+    contenedor_app = ft.Container(expand=True, visible=False)
+    
+    # Campos para PIN
+    pin_inputs = []
+    for i in range(4):
+        pin_inputs.append(ft.TextField(
+            width=50,
+            height=60,
+            text_align=ft.TextAlign.CENTER,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            max_length=1,
+            text_size=24,
+            border_radius=10,
+            password=True,
+            on_change=lambda e, idx=i: manejar_pin_input(e, idx)
+        ))
+    
+    txt_pin_mensaje = ft.Text("", color="red", size=14, text_align=ft.TextAlign.CENTER)
+    txt_pin_titulo = ft.Text("Ingresa tu PIN", size=24, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER)
+    
+    def manejar_pin_input(e, idx):
+        """Maneja la entrada de PIN y pasa al siguiente campo"""
+        if e.control.value and idx < 3:
+            pin_inputs[idx + 1].focus()
+        
+        # Si es el último dígito, verificar PIN
+        if idx == 3 and e.control.value:
+            pin_completo = "".join([p.value for p in pin_inputs])
+            if len(pin_completo) == 4:
+                verificar_pin_ingresado(pin_completo)
+    
+    def verificar_pin_ingresado(pin):
+        """Verifica el PIN ingresado"""
+        if db.tiene_pin():
+            if db.verificar_pin(pin):
+                desbloquear_app()
+            else:
+                txt_pin_mensaje.value = "❌ PIN incorrecto"
+                limpiar_pin()
+                page.update()
+        else:
+            # Es nuevo, guardar PIN
+            guardar_nuevo_pin(pin)
+    
+    def guardar_nuevo_pin(pin):
+        """Guarda un nuevo PIN"""
+        if db.guardar_pin(pin):
+            txt_pin_mensaje.value = "✅ PIN creado correctamente"
+            page.update()
+            import time
+            time.sleep(0.5)
+            desbloquear_app()
+    
+    def limpiar_pin():
+        """Limpia los campos de PIN"""
+        for p in pin_inputs:
+            p.value = ""
+        pin_inputs[0].focus()
+    
+    def desbloquear_app():
+        """Desbloquea la app y muestra la pantalla principal"""
+        app_desbloqueada[0] = True
+        contenedor_login.visible = False
+        contenedor_app.visible = True
+        
+        # Si es primera vez, mostrar onboarding
+        if db.es_primera_vez():
+            mostrar_onboarding()
+        else:
+            actualizar_vista()
+        
+        page.update()
+    
+    def saltar_pin():
+        """Permite saltar el PIN (solo si no hay PIN configurado)"""
+        if not db.tiene_pin():
+            desbloquear_app()
+    
+    # Botón para saltar PIN (solo visible si no hay PIN)
+    btn_saltar_pin = ft.TextButton(
+        "Continuar sin PIN",
+        on_click=lambda e: saltar_pin(),
+        visible=not db.tiene_pin()
+    )
+    
+    # =====================================================
+    # PANTALLA DE ONBOARDING
+    # =====================================================
+    
+    onboarding_index = [0]
+    
+    onboarding_pages = [
+        {
+            "icono": "account_balance_wallet",
+            "titulo": "¡Bienvenido a Mis Finanzas!",
+            "descripcion": "Tu asistente personal para controlar ingresos, gastos y alcanzar tus metas financieras.",
+            "color": "blue"
+        },
+        {
+            "icono": "trending_up",
+            "titulo": "Controla tus Movimientos",
+            "descripcion": "Registra fácilmente todos tus ingresos y gastos. Categoriza y mantén un historial completo.",
+            "color": "green"
+        },
+        {
+            "icono": "subscriptions",
+            "titulo": "Gestiona Suscripciones",
+            "descripcion": "Nunca pierdas de vista tus pagos recurrentes como Netflix, Spotify y más.",
+            "color": "orange"
+        },
+        {
+            "icono": "savings",
+            "titulo": "Alcanza tus Metas",
+            "descripcion": "Crea metas de ahorro y visualiza tu progreso. ¡Cada peso cuenta!",
+            "color": "teal"
+        },
+        {
+            "icono": "pie_chart",
+            "titulo": "Visualiza tus Finanzas",
+            "descripcion": "Gráficos y reportes para entender mejor cómo gastas tu dinero.",
+            "color": "purple"
+        }
+    ]
+    
+    contenedor_onboarding = ft.Container(visible=False, expand=True)
+    
+    def crear_pagina_onboarding(index):
+        """Crea una página del onboarding"""
+        p = onboarding_pages[index]
+        return ft.Container(
+            content=ft.Column([
+                ft.Container(height=50),
+                ft.Icon(p["icono"], size=120, color=p["color"]),
+                ft.Container(height=30),
+                ft.Text(p["titulo"], size=28, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER),
+                ft.Container(height=20),
+                ft.Text(p["descripcion"], size=16, text_align=ft.TextAlign.CENTER, color="grey600"),
+                ft.Container(height=50),
+                # Indicadores de página
+                ft.Row(
+                    [ft.Container(
+                        width=10 if i != index else 30,
+                        height=10,
+                        border_radius=5,
+                        bgcolor=p["color"] if i == index else "grey300"
+                    ) for i in range(len(onboarding_pages))],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    spacing=5
+                ),
+                ft.Container(height=30),
+                ft.Row([
+                    ft.TextButton("Saltar", on_click=lambda e: finalizar_onboarding()) if index < len(onboarding_pages) - 1 else ft.Container(),
+                    ft.ElevatedButton(
+                        "Siguiente" if index < len(onboarding_pages) - 1 else "¡Comenzar!",
+                        on_click=lambda e: siguiente_onboarding(),
+                        bgcolor=p["color"],
+                        color="white"
+                    )
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=30,
+            expand=True
+        )
+    
+    def mostrar_onboarding():
+        """Muestra la pantalla de onboarding"""
+        onboarding_index[0] = 0
+        contenedor_onboarding.content = crear_pagina_onboarding(0)
+        contenedor_onboarding.visible = True
+        contenedor_app.visible = False
+        page.update()
+    
+    def siguiente_onboarding():
+        """Avanza a la siguiente página del onboarding"""
+        if onboarding_index[0] < len(onboarding_pages) - 1:
+            onboarding_index[0] += 1
+            contenedor_onboarding.content = crear_pagina_onboarding(onboarding_index[0])
+            page.update()
+        else:
+            finalizar_onboarding()
+    
+    def finalizar_onboarding():
+        """Finaliza el onboarding y muestra la app"""
+        db.completar_onboarding()
+        contenedor_onboarding.visible = False
+        contenedor_app.visible = True
+        actualizar_vista()
+        page.update()
+    
+    # =====================================================
+    # COMPONENTES PRINCIPALES DE LA APP
+    # =====================================================
     
     # Texto del Balance
     txt_balance_total = ft.Text("$0", size=36, weight=ft.FontWeight.BOLD)
@@ -565,17 +1257,17 @@ def main(page: ft.Page):
     input_desc = ft.TextField(
         label="Descripción",
         hint_text="Ej: Supermercado",
-        color="black",
+        color=colores["texto"],
         text_size=16,
-        border_color="blue700",
+        border_color=colores["input_border"],
         focused_border_color="blue900"
     )
     input_monto = ft.TextField(
         label="Monto",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
-        border_color="blue700",
+        border_color=colores["input_border"],
         focused_border_color="blue900"
     )
     dropdown_tipo = ft.Dropdown(
@@ -666,70 +1358,414 @@ def main(page: ft.Page):
         txt_bancos.value = f"${total_bancos:,.0f}"
         txt_disponible.value = f"${disponible:,.0f}"
 
-    def crear_vista_inicio():
-        """Crea la vista principal con movimientos"""
-        lista_movimientos = ft.ListView(spacing=10, padding=10, expand=True)
+    # =====================================================
+    # DIÁLOGOS DE CONFIRMACIÓN Y EDICIÓN
+    # =====================================================
+    
+    dialogo_confirmacion = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("⚠️ Confirmar eliminación"),
+        content=ft.Text("¿Estás seguro de que deseas eliminar este registro?"),
+        actions=[
+            ft.TextButton("Cancelar", on_click=lambda e: cerrar_dialogo()),
+            ft.ElevatedButton("Eliminar", bgcolor="red", color="white", on_click=lambda e: None),
+        ],
+        actions_alignment=ft.MainAxisAlignment.END,
+    )
+    
+    def cerrar_dialogo():
+        dialogo_confirmacion.open = False
+        page.update()
+    
+    def confirmar_borrado(tipo, id_registro, nombre=""):
+        """Muestra diálogo de confirmación antes de borrar"""
+        dialogo_confirmacion.content = ft.Text(f"¿Eliminar {nombre}?")
+        dialogo_confirmacion.actions[1].on_click = lambda e: ejecutar_borrado(tipo, id_registro)
+        dialogo_confirmacion.open = True
+        page.update()
+    
+    def ejecutar_borrado(tipo, id_registro):
+        """Ejecuta el borrado después de confirmación"""
+        if tipo == "movimiento":
+            db.borrar_movimiento(id_registro)
+        elif tipo == "suscripcion":
+            db.borrar_suscripcion(id_registro)
+        elif tipo == "prestamo":
+            db.borrar_prestamo(id_registro)
+        elif tipo == "ahorro":
+            db.borrar_ahorro(id_registro)
+        elif tipo == "credito":
+            db.borrar_credito(id_registro)
+        elif tipo == "cuenta":
+            db.borrar_cuenta_bancaria(id_registro)
+        elif tipo == "presupuesto":
+            db.borrar_presupuesto(id_registro)
         
-        movimientos = db.obtener_movimientos()
+        cerrar_dialogo()
+        actualizar_vista()
+    
+    # Variables para edición
+    registro_editando = [None, None]  # [tipo, id]
+    
+    # =====================================================
+    # BÚSQUEDA Y FILTROS
+    # =====================================================
+    
+    input_busqueda = ft.TextField(
+        label="🔍 Buscar",
+        hint_text="Buscar movimientos...",
+        border_radius=20,
+        on_change=lambda e: aplicar_filtros()
+    )
+    
+    filtro_categoria = ft.Dropdown(
+        label="Categoría",
+        options=[ft.dropdown.Option("", "Todas")] + [
+            ft.dropdown.Option("Comida"), ft.dropdown.Option("Transporte"),
+            ft.dropdown.Option("Servicios"), ft.dropdown.Option("Ocio"),
+            ft.dropdown.Option("Salud"), ft.dropdown.Option("Salario"),
+            ft.dropdown.Option("Compras"), ft.dropdown.Option("Educación"),
+            ft.dropdown.Option("Otro")
+        ],
+        value="",
+        on_change=lambda e: aplicar_filtros()
+    )
+    
+    filtro_tipo = ft.Dropdown(
+        label="Tipo",
+        options=[
+            ft.dropdown.Option("", "Todos"),
+            ft.dropdown.Option("ingreso", "Ingresos"),
+            ft.dropdown.Option("gasto", "Gastos")
+        ],
+        value="",
+        on_change=lambda e: aplicar_filtros()
+    )
+    
+    mostrar_filtros = [False]
+    
+    def aplicar_filtros():
+        """Aplica los filtros y actualiza la vista"""
+        actualizar_vista()
+    
+    def toggle_filtros():
+        """Muestra/oculta los filtros"""
+        mostrar_filtros[0] = not mostrar_filtros[0]
+        actualizar_vista()
+    
+    # =====================================================
+    # VISTA DE INICIO CON MEJORAS
+    # =====================================================
+    
+    def crear_vista_inicio():
+        """Crea la vista principal con gráficos interactivos y movimientos"""
+        colores = obtener_colores()
+        
+        # Datos del mes actual
+        ahora = datetime.datetime.now()
+        mes_actual = ahora.month
+        anio_actual = ahora.year
+        meses_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
+                        "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        mes_nombre = meses_nombres[mes_actual - 1]
+        
+        # Obtener datos financieros del mes
+        ingresos_mes, gastos_mes = db.obtener_balance_mensual(mes_actual, anio_actual)
+        total_subs = db.obtener_total_suscripciones()
+        total_cuotas = db.obtener_total_cuotas_prestamos()
+        total_creditos = db.obtener_total_cuotas_creditos()
+        gastos_fijos = total_subs + total_cuotas + total_creditos
+        disponible_mes = ingresos_mes - gastos_mes - gastos_fijos
+        
+        # Gastos por categoría
+        gastos_categoria = db.obtener_gastos_por_categoria(mes_actual, anio_actual)
+        
+        # Colores para categorías
+        colores_cat = {
+            "Comida": "#FF6384", "Transporte": "#36A2EB", "Servicios": "#FFCE56",
+            "Ocio": "#4BC0C0", "Salud": "#9966FF", "Salario": "#2ECC71",
+            "Compras": "#FF9F40", "Educación": "#E74C3C", "Otro": "#95A5A6"
+        }
+        
+        # === GRÁFICO CIRCULAR DE DISTRIBUCIÓN ===
+        def crear_grafico_circular():
+            total_egresos = gastos_mes + gastos_fijos
+            if total_egresos <= 0:
+                return ft.Container(
+                    content=ft.Text("Sin gastos este mes", color=colores["texto_secundario"], italic=True),
+                    alignment=ft.alignment.center,
+                    padding=20
+                )
+            
+            # Calcular porcentajes para el anillo
+            pct_gastos = (gastos_mes / total_egresos * 100) if total_egresos > 0 else 0
+            pct_fijos = (gastos_fijos / total_egresos * 100) if total_egresos > 0 else 0
+            
+            return ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Stack([
+                            ft.Container(
+                                width=100, height=100,
+                                border_radius=50,
+                                bgcolor=colores["borde"],
+                            ),
+                            ft.Container(
+                                width=100, height=100,
+                                content=ft.Column([
+                                    ft.Text(f"${total_egresos:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                                    ft.Text("Total", size=10, color=colores["texto_secundario"])
+                                ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            ),
+                        ]),
+                        ft.Column([
+                            ft.Row([
+                                ft.Container(width=12, height=12, bgcolor=colores["rojo"], border_radius=3),
+                                ft.Text(f"Gastos: {pct_gastos:.0f}%", size=12, color=colores["texto"])
+                            ], spacing=8),
+                            ft.Row([
+                                ft.Container(width=12, height=12, bgcolor=colores["naranja"], border_radius=3),
+                                ft.Text(f"Fijos: {pct_fijos:.0f}%", size=12, color=colores["texto"])
+                            ], spacing=8),
+                        ], spacing=8)
+                    ], alignment=ft.MainAxisAlignment.SPACE_AROUND),
+                ]),
+                padding=10
+            )
+        
+        # === BARRA DE PROGRESO DEL MES ===
+        def crear_barra_progreso_mes():
+            dia_actual = ahora.day
+            dias_mes = 31 if mes_actual in [1,3,5,7,8,10,12] else 30 if mes_actual in [4,6,9,11] else 29 if anio_actual % 4 == 0 else 28
+            progreso_dias = dia_actual / dias_mes
+            
+            # Calcular si vamos bien o mal
+            if ingresos_mes > 0:
+                progreso_gastos = (gastos_mes + gastos_fijos) / ingresos_mes
+                estado_color = colores["verde"] if progreso_gastos <= progreso_dias else colores["rojo"]
+                estado_texto = "✅ Vas bien" if progreso_gastos <= progreso_dias else "⚠️ Cuidado"
+            else:
+                progreso_gastos = 0
+                estado_color = colores["texto_secundario"]
+                estado_texto = "Sin ingresos"
+            
+            return ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Text(f"📅 Día {dia_actual} de {dias_mes}", size=13, color=colores["texto"]),
+                        ft.Text(estado_texto, size=13, color=estado_color, weight=ft.FontWeight.BOLD)
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    ft.ProgressBar(value=progreso_dias, color=colores["azul"], bgcolor=colores["borde"], height=8),
+                    ft.Row([
+                        ft.Text(f"Gastado: ${gastos_mes + gastos_fijos:,.0f}", size=11, color=colores["rojo"]),
+                        ft.Text(f"de ${ingresos_mes:,.0f}", size=11, color=colores["texto_secundario"])
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ], spacing=8),
+                padding=15,
+                bgcolor=colores["tarjeta"],
+                border_radius=12,
+                margin=ft.margin.only(left=10, right=10, bottom=10)
+            )
+        
+        # === MINI GRÁFICO DE CATEGORÍAS ===
+        def crear_grafico_categorias_mini():
+            if not gastos_categoria:
+                return ft.Container()
+            
+            total_gastos = sum([g[1] for g in gastos_categoria])
+            max_gasto = max([g[1] for g in gastos_categoria]) if gastos_categoria else 1
+            
+            # Solo mostrar top 4 categorías
+            top_cats = sorted(gastos_categoria, key=lambda x: x[1], reverse=True)[:4]
+            
+            barras = []
+            for cat, monto in top_cats:
+                pct = (monto / total_gastos * 100) if total_gastos > 0 else 0
+                ancho = (monto / max_gasto) if max_gasto > 0 else 0
+                color = colores_cat.get(cat, "#95A5A6")
+                
+                barras.append(
+                    ft.Row([
+                        ft.Container(
+                            content=ft.Text(cat[:8], size=10, color=colores["texto"]),
+                            width=65
+                        ),
+                        ft.Container(
+                            content=ft.Container(
+                                width=ancho * 120,
+                                height=16,
+                                bgcolor=color,
+                                border_radius=4,
+                            ),
+                            bgcolor=colores["borde"],
+                            border_radius=4,
+                            width=120,
+                            height=16,
+                        ),
+                        ft.Text(f"{pct:.0f}%", size=10, color=colores["texto_secundario"], width=35)
+                    ], spacing=5)
+                )
+            
+            return ft.Container(
+                content=ft.Column([
+                    ft.Text("🏷️ Top Gastos", size=13, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                    ft.Divider(height=5, color="transparent"),
+                    *barras
+                ], spacing=6),
+                padding=15,
+                bgcolor=colores["tarjeta"],
+                border_radius=12,
+                margin=ft.margin.only(left=10, right=10, bottom=10)
+            )
+        
+        # === RESUMEN RÁPIDO ===
+        def crear_resumen_rapido():
+            return ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Text(f"💰 {mes_nombre} {anio_actual}", size=18, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                    ]),
+                    ft.Divider(height=10, color="transparent"),
+                    ft.Row([
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Icon("trending_up", color=colores["verde"], size=22),
+                                ft.Text(f"${ingresos_mes:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["verde"]),
+                                ft.Text("Ingresos", size=10, color=colores["texto_secundario"])
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                            bgcolor=colores["verde_bg"],
+                            padding=10,
+                            border_radius=10,
+                            expand=True
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Icon("trending_down", color=colores["rojo"], size=22),
+                                ft.Text(f"${gastos_mes:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["rojo"]),
+                                ft.Text("Gastos", size=10, color=colores["texto_secundario"])
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                            bgcolor=colores["rojo_bg"],
+                            padding=10,
+                            border_radius=10,
+                            expand=True
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Icon("account_balance_wallet", color=colores["azul"], size=22),
+                                ft.Text(f"${disponible_mes:,.0f}", size=14, weight=ft.FontWeight.BOLD, 
+                                       color=colores["verde"] if disponible_mes >= 0 else colores["rojo"]),
+                                ft.Text("Disponible", size=10, color=colores["texto_secundario"])
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                            bgcolor=colores["azul_bg"],
+                            padding=10,
+                            border_radius=10,
+                            expand=True
+                        ),
+                    ], spacing=8),
+                ]),
+                padding=15,
+                margin=10,
+                bgcolor=colores["tarjeta"],
+                border_radius=15,
+                shadow=ft.BoxShadow(spread_radius=0, blur_radius=8, color="black12", offset=ft.Offset(0, 2))
+            )
+        
+        # === LISTA DE MOVIMIENTOS ===
+        lista_movimientos = ft.ListView(spacing=8, padding=10, expand=True)
+        
+        texto_busqueda = input_busqueda.value if input_busqueda.value else ""
+        cat_filtro = filtro_categoria.value if filtro_categoria.value else None
+        tipo_filtro = filtro_tipo.value if filtro_tipo.value else None
+        
+        if texto_busqueda or cat_filtro or tipo_filtro:
+            movimientos = db.buscar_movimientos(texto_busqueda, cat_filtro, tipo_filtro)
+        else:
+            movimientos = db.obtener_movimientos()[:10]  # Solo últimos 10
         
         if not movimientos:
             lista_movimientos.controls.append(
                 ft.Container(
                     content=ft.Text("No hay movimientos aún.\n¡Agrega tu primer movimiento!", 
-                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color="grey"),
-                    padding=40
+                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color=colores["texto_secundario"]),
+                    padding=30
                 )
             )
         else:
             for mov in movimientos:
-                # mov = (id, tipo, categoria, monto, desc, fecha) o (id, tipo, categoria, monto, desc, fecha, modo)
-                if len(mov) == 7:  # BD antigua con columna 'modo'
+                if len(mov) == 7:
                     id_mov, tipo, cat, monto, desc, fecha, modo = mov
-                else:  # BD nueva sin columna 'modo'
+                else:
                     id_mov, tipo, cat, monto, desc, fecha = mov
                 
                 icono = "trending_down" if tipo == "gasto" else "trending_up"
-                color_icono = "red" if tipo == "gasto" else "green"
-                bgcolor_card = "#fff5f5" if tipo == "gasto" else "#f0fff4"
+                color_icono = colores["rojo"] if tipo == "gasto" else colores["verde"]
                 
                 item = ft.Container(
                     content=ft.Row([
-                        ft.Icon(icono, color=color_icono, size=28),
+                        ft.Icon(icono, color=color_icono, size=24),
                         ft.Column([
-                            ft.Text(desc, weight=ft.FontWeight.BOLD, size=15),
-                            ft.Text(f"{cat} · {fecha}", size=12, color="grey600"),
-                        ], expand=True, spacing=2),
+                            ft.Text(desc, weight=ft.FontWeight.W_500, size=14, color=colores["texto"]),
+                            ft.Text(f"{cat} · {fecha}", size=11, color=colores["texto_secundario"]),
+                        ], expand=True, spacing=1),
                         ft.Column([
-                            ft.Text(f"${monto:,.0f}", weight=ft.FontWeight.BOLD, color=color_icono, size=16),
-                            ft.IconButton(
-                                icon="delete_outline", 
-                                icon_color="grey400",
-                                icon_size=20,
-                                tooltip="Borrar",
-                                on_click=lambda e, x=id_mov: borrar_movimiento(x)
-                            )
+                            ft.Text(f"${monto:,.0f}", weight=ft.FontWeight.BOLD, color=color_icono, size=14),
+                            ft.Row([
+                                ft.IconButton(
+                                    icon="edit_outlined",
+                                    icon_color=colores["azul"],
+                                    icon_size=16,
+                                    tooltip="Editar",
+                                    on_click=lambda e, m=mov: abrir_editar_movimiento(m)
+                                ),
+                                ft.IconButton(
+                                    icon="delete_outline", 
+                                    icon_color=colores["rojo"],
+                                    icon_size=16,
+                                    tooltip="Borrar",
+                                    on_click=lambda e, x=id_mov, d=desc: confirmar_borrado("movimiento", x, d)
+                                )
+                            ], spacing=0)
                         ], alignment=ft.MainAxisAlignment.END, horizontal_alignment=ft.CrossAxisAlignment.END)
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    padding=12,
-                    border_radius=12,
-                    bgcolor=bgcolor_card,
-                    border=ft.border.all(1, "#e0e0e0"),
-                    shadow=ft.BoxShadow(spread_radius=0, blur_radius=4, color="black12", offset=ft.Offset(0, 2))
+                    padding=10,
+                    border_radius=10,
+                    bgcolor=colores["tarjeta"],
+                    border=ft.border.all(1, colores["borde"]),
                 )
                 lista_movimientos.controls.append(item)
         
+        # Barra de búsqueda compacta
+        barra_busqueda = ft.Container(
+            content=ft.Row([
+                ft.Container(content=input_busqueda, expand=True),
+                ft.IconButton(
+                    icon="filter_list",
+                    icon_color=colores["azul"],
+                    tooltip="Filtros",
+                    on_click=lambda e: toggle_filtros()
+                )
+            ]),
+            padding=ft.padding.only(left=10, right=10),
+        )
+        
         return ft.Column([
-            crear_resumen_balance(),
-            ft.Divider(height=1, color="grey300"),
+            crear_resumen_rapido(),
+            crear_barra_progreso_mes(),
+            crear_grafico_categorias_mini(),
             ft.Container(
-                content=ft.Text("📋 Movimientos Recientes", size=16, weight=ft.FontWeight.BOLD),
-                padding=ft.padding.only(left=15, top=10, bottom=5)
+                content=ft.Row([
+                    ft.Text("📋 Últimos Movimientos", size=14, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                    ft.Text(f"({len(movimientos)})", size=12, color=colores["texto_secundario"])
+                ]),
+                padding=ft.padding.only(left=15, top=5, bottom=5)
             ),
+            barra_busqueda,
             lista_movimientos
-        ], spacing=0, expand=True)
+        ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
     
     def crear_vista_suscripciones():
         """Crea la vista de suscripciones"""
+        colores = obtener_colores()
         lista_subs = ft.ListView(spacing=10, padding=10, expand=True)
         
         suscripciones = db.obtener_suscripciones()
@@ -738,55 +1774,63 @@ def main(page: ft.Page):
         # Header con total
         header = ft.Container(
             content=ft.Column([
-                ft.Text("📆 Suscripciones Activas", size=20, weight=ft.FontWeight.BOLD),
+                ft.Text("📆 Suscripciones Activas", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                 ft.Divider(height=10, color="transparent"),
                 ft.Row([
-                    ft.Text("Total mensual:", size=16, color="grey700"),
-                    ft.Text(f"${total:,.0f}", size=24, weight=ft.FontWeight.BOLD, color="orange")
+                    ft.Text("Total mensual:", size=16, color=colores["texto_secundario"]),
+                    ft.Text(f"${total:,.0f}", size=24, weight=ft.FontWeight.BOLD, color=colores["naranja"])
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
             ]),
             padding=20,
-            bgcolor="orange50",
+            bgcolor=colores["naranja_bg"],
             border_radius=15,
-            margin=10
+            margin=10,
+            border=ft.border.all(1, colores["borde"])
         )
         
         if not suscripciones:
             lista_subs.controls.append(
                 ft.Container(
                     content=ft.Text("No tienes suscripciones activas.\n¡Agrega tus servicios recurrentes!", 
-                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color="grey"),
+                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color=colores["texto_secundario"]),
                     padding=40
                 )
             )
         else:
             for sub in suscripciones:
-                # sub = (id, nombre, monto, dia_cobro, activa)
                 id_sub, nombre, monto, dia_cobro, activa = sub
                 
                 item = ft.Container(
                     content=ft.Row([
-                        ft.Icon("subscriptions", color="orange", size=28),
+                        ft.Icon("subscriptions", color=colores["naranja"], size=28),
                         ft.Column([
-                            ft.Text(nombre, weight=ft.FontWeight.BOLD, size=15),
-                            ft.Text(f"Se cobra el día {dia_cobro} de cada mes", size=12, color="grey600"),
+                            ft.Text(nombre, weight=ft.FontWeight.BOLD, size=15, color=colores["texto"]),
+                            ft.Text(f"Se cobra el día {dia_cobro} de cada mes", size=12, color=colores["texto_secundario"]),
                         ], expand=True, spacing=2),
                         ft.Column([
-                            ft.Text(f"${monto:,.0f}/mes", weight=ft.FontWeight.BOLD, color="orange", size=16),
-                            ft.IconButton(
-                                icon="delete_outline", 
-                                icon_color="grey400",
-                                icon_size=20,
-                                tooltip="Eliminar",
-                                on_click=lambda e, x=id_sub: borrar_suscripcion(x)
-                            )
+                            ft.Text(f"${monto:,.0f}/mes", weight=ft.FontWeight.BOLD, color=colores["naranja"], size=16),
+                            ft.Row([
+                                ft.IconButton(
+                                    icon="edit_outlined",
+                                    icon_color=colores["azul"],
+                                    icon_size=18,
+                                    tooltip="Editar",
+                                    on_click=lambda e, s=sub: abrir_editar_suscripcion(s)
+                                ),
+                                ft.IconButton(
+                                    icon="delete_outline", 
+                                    icon_color=colores["rojo"],
+                                    icon_size=18,
+                                    tooltip="Eliminar",
+                                    on_click=lambda e, x=id_sub, n=nombre: confirmar_borrado("suscripcion", x, n)
+                                )
+                            ], spacing=0)
                         ], alignment=ft.MainAxisAlignment.END, horizontal_alignment=ft.CrossAxisAlignment.END)
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                     padding=12,
                     border_radius=12,
-                    bgcolor="white",
-                    border=ft.border.all(1, "orange200"),
-                    shadow=ft.BoxShadow(spread_radius=0, blur_radius=4, color="black12", offset=ft.Offset(0, 2))
+                    bgcolor=colores["tarjeta"],
+                    border=ft.border.all(1, colores["borde"]),
                 )
                 lista_subs.controls.append(item)
         
@@ -794,6 +1838,7 @@ def main(page: ft.Page):
     
     def crear_vista_prestamos():
         """Crea la vista de préstamos bancarios"""
+        colores = obtener_colores()
         lista_prestamos = ft.ListView(spacing=10, padding=10, expand=True)
         
         prestamos = db.obtener_prestamos()
@@ -803,42 +1848,42 @@ def main(page: ft.Page):
         # Header con totales
         header = ft.Container(
             content=ft.Column([
-                ft.Text("🏦 Préstamos Bancarios", size=20, weight=ft.FontWeight.BOLD),
+                ft.Text("🏦 Préstamos Bancarios", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                 ft.Divider(height=10, color="transparent"),
                 ft.Row([
                     ft.Container(
                         content=ft.Column([
-                            ft.Text("Cuotas/mes", size=12, color="grey700"),
-                            ft.Text(f"${total_cuotas:,.0f}", size=20, weight=ft.FontWeight.BOLD, color="purple")
+                            ft.Text("Cuotas/mes", size=12, color=colores["texto_secundario"]),
+                            ft.Text(f"${total_cuotas:,.0f}", size=20, weight=ft.FontWeight.BOLD, color=colores["purple"])
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                         expand=True
                     ),
                     ft.Container(
                         content=ft.Column([
-                            ft.Text("Deuda total", size=12, color="grey700"),
-                            ft.Text(f"${deuda_total:,.0f}", size=20, weight=ft.FontWeight.BOLD, color="red")
+                            ft.Text("Deuda total", size=12, color=colores["texto_secundario"]),
+                            ft.Text(f"${deuda_total:,.0f}", size=20, weight=ft.FontWeight.BOLD, color=colores["rojo"])
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                         expand=True
                     ),
                 ], alignment=ft.MainAxisAlignment.SPACE_AROUND)
             ]),
             padding=20,
-            bgcolor="purple50",
+            bgcolor=colores["purple_bg"],
             border_radius=15,
-            margin=10
+            margin=10,
+            border=ft.border.all(1, colores["borde"])
         )
         
         if not prestamos:
             lista_prestamos.controls.append(
                 ft.Container(
                     content=ft.Text("No tienes préstamos registrados.\n¡Mantén control de tus deudas bancarias!", 
-                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color="grey"),
+                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color=colores["texto_secundario"]),
                     padding=40
                 )
             )
         else:
             for prestamo in prestamos:
-                # prestamo = (id, banco, monto_total, monto_pagado, cuota_mensual, dia_pago, fecha_inicio, activo)
                 id_pres, banco, monto_total, monto_pagado, cuota_mensual, dia_pago, fecha_inicio, activo = prestamo
                 
                 saldo_pendiente = monto_total - monto_pagado
@@ -847,50 +1892,49 @@ def main(page: ft.Page):
                 item = ft.Container(
                     content=ft.Column([
                         ft.Row([
-                            ft.Icon("account_balance", color="purple", size=28),
+                            ft.Icon("account_balance", color=colores["purple"], size=28),
                             ft.Column([
-                                ft.Text(banco, weight=ft.FontWeight.BOLD, size=15),
-                                ft.Text(f"Cuota: ${cuota_mensual:,.0f}/mes · Día {dia_pago}", size=12, color="grey600"),
+                                ft.Text(banco, weight=ft.FontWeight.BOLD, size=15, color=colores["texto"]),
+                                ft.Text(f"Cuota: ${cuota_mensual:,.0f}/mes · Día {dia_pago}", size=12, color=colores["texto_secundario"]),
                             ], expand=True, spacing=2),
                             ft.IconButton(
                                 icon="delete_outline", 
-                                icon_color="grey400",
+                                icon_color=colores["rojo"],
                                 icon_size=20,
                                 tooltip="Eliminar",
-                                on_click=lambda e, x=id_pres: borrar_prestamo(x)
+                                on_click=lambda e, x=id_pres, b=banco: confirmar_borrado("prestamo", x, b)
                             )
                         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                         ft.Divider(height=5, color="transparent"),
                         ft.Row([
                             ft.Column([
-                                ft.Text("Pagado", size=11, color="grey600"),
-                                ft.Text(f"${monto_pagado:,.0f}", size=14, weight=ft.FontWeight.BOLD, color="green"),
+                                ft.Text("Pagado", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${monto_pagado:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["verde"]),
                             ]),
                             ft.Column([
-                                ft.Text("Pendiente", size=11, color="grey600"),
-                                ft.Text(f"${saldo_pendiente:,.0f}", size=14, weight=ft.FontWeight.BOLD, color="red"),
+                                ft.Text("Pendiente", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${saldo_pendiente:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["rojo"]),
                             ]),
                             ft.Column([
-                                ft.Text("Total", size=11, color="grey600"),
-                                ft.Text(f"${monto_total:,.0f}", size=14, weight=ft.FontWeight.BOLD),
+                                ft.Text("Total", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${monto_total:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                             ]),
                         ], alignment=ft.MainAxisAlignment.SPACE_AROUND),
-                        ft.ProgressBar(value=porcentaje_pagado/100, color="purple", bgcolor="purple100"),
-                        ft.Text(f"{porcentaje_pagado:.1f}% pagado", size=11, color="purple", text_align=ft.TextAlign.CENTER),
+                        ft.ProgressBar(value=porcentaje_pagado/100, color=colores["purple"], bgcolor=colores["borde"]),
+                        ft.Text(f"{porcentaje_pagado:.1f}% pagado", size=11, color=colores["purple"], text_align=ft.TextAlign.CENTER),
                         ft.ElevatedButton(
                             "Registrar Pago",
                             icon="payment",
                             on_click=lambda e, x=id_pres: abrir_registrar_pago(x),
-                            bgcolor="purple700",
+                            bgcolor=colores["purple"],
                             color="white",
                             width=float("inf")
                         )
                     ], spacing=8),
                     padding=12,
                     border_radius=12,
-                    bgcolor="white",
-                    border=ft.border.all(1, "purple200"),
-                    shadow=ft.BoxShadow(spread_radius=0, blur_radius=4, color="black12", offset=ft.Offset(0, 2))
+                    bgcolor=colores["tarjeta"],
+                    border=ft.border.all(1, colores["borde"]),
                 )
                 lista_prestamos.controls.append(item)
         
@@ -898,6 +1942,7 @@ def main(page: ft.Page):
     
     def crear_vista_creditos():
         """Crea la vista de compras a crédito"""
+        colores = obtener_colores()
         lista_creditos = ft.ListView(spacing=10, padding=10, expand=True)
         
         creditos = db.obtener_creditos()
@@ -907,27 +1952,27 @@ def main(page: ft.Page):
         # Header con totales
         header = ft.Container(
             content=ft.Column([
-                ft.Text("💳 Compras a Crédito", size=20, weight=ft.FontWeight.BOLD),
+                ft.Text("💳 Compras a Crédito", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                 ft.Divider(height=10, color="transparent"),
                 ft.Row([
                     ft.Container(
                         content=ft.Column([
-                            ft.Text("Cuotas/mes", size=12, color="grey700"),
-                            ft.Text(f"${total_cuotas:,.0f}", size=20, weight=ft.FontWeight.BOLD, color="indigo")
+                            ft.Text("Cuotas/mes", size=12, color=colores["texto_secundario"]),
+                            ft.Text(f"${total_cuotas:,.0f}", size=20, weight=ft.FontWeight.BOLD, color=colores["indigo"])
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                         expand=True
                     ),
                     ft.Container(
                         content=ft.Column([
-                            ft.Text("Deuda total", size=12, color="grey700"),
-                            ft.Text(f"${deuda_total:,.0f}", size=20, weight=ft.FontWeight.BOLD, color="red")
+                            ft.Text("Deuda total", size=12, color=colores["texto_secundario"]),
+                            ft.Text(f"${deuda_total:,.0f}", size=20, weight=ft.FontWeight.BOLD, color=colores["rojo"])
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                         expand=True
                     ),
                 ], alignment=ft.MainAxisAlignment.SPACE_AROUND)
             ]),
             padding=20,
-            bgcolor="indigo50",
+            bgcolor=colores["indigo_bg"],
             border_radius=15,
             margin=10
         )
@@ -936,7 +1981,7 @@ def main(page: ft.Page):
             lista_creditos.controls.append(
                 ft.Container(
                     content=ft.Text("No tienes compras a crédito.\n¡Controla tus compras en meses sin intereses!", 
-                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color="grey"),
+                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color=colores["texto_secundario"]),
                     padding=40
                 )
             )
@@ -955,15 +2000,15 @@ def main(page: ft.Page):
                 item = ft.Container(
                     content=ft.Column([
                         ft.Row([
-                            ft.Icon("credit_card", color="indigo", size=28),
+                            ft.Icon("credit_card", color=colores["indigo"], size=28),
                             ft.Column([
-                                ft.Text(descripcion, weight=ft.FontWeight.BOLD, size=15),
-                                ft.Text(f"{banco} · {fecha_compra}", size=12, color="grey600"),
-                                ft.Text(tipo_credito, size=11, color="indigo", italic=True),
+                                ft.Text(descripcion, weight=ft.FontWeight.BOLD, size=15, color=colores["texto"]),
+                                ft.Text(f"{banco} · {fecha_compra}", size=12, color=colores["texto_secundario"]),
+                                ft.Text(tipo_credito, size=11, color=colores["indigo"], italic=True),
                             ], expand=True, spacing=2),
                             ft.IconButton(
                                 icon="delete_outline", 
-                                icon_color="grey400",
+                                icon_color=colores["texto_secundario"],
                                 icon_size=20,
                                 tooltip="Eliminar",
                                 on_click=lambda e, x=id_cred: borrar_credito(x)
@@ -972,33 +2017,33 @@ def main(page: ft.Page):
                         ft.Divider(height=5, color="transparent"),
                         ft.Row([
                             ft.Column([
-                                ft.Text("Cuota mensual", size=11, color="grey600"),
-                                ft.Text(f"${cuota_mensual:,.0f}", size=14, weight=ft.FontWeight.BOLD, color="indigo"),
+                                ft.Text("Cuota mensual", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${cuota_mensual:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["indigo"]),
                             ]),
                             ft.Column([
-                                ft.Text("Meses", size=11, color="grey600"),
-                                ft.Text(f"{meses_pagados}/{meses_totales}", size=14, weight=ft.FontWeight.BOLD),
+                                ft.Text("Meses", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"{meses_pagados}/{meses_totales}", size=14, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                             ]),
                             ft.Column([
-                                ft.Text("Pendiente", size=11, color="grey600"),
-                                ft.Text(f"${saldo_pendiente:,.0f}", size=14, weight=ft.FontWeight.BOLD, color="red"),
+                                ft.Text("Pendiente", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${saldo_pendiente:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["rojo"]),
                             ]),
                         ], alignment=ft.MainAxisAlignment.SPACE_AROUND),
-                        ft.ProgressBar(value=porcentaje_pagado/100, color="indigo", bgcolor="indigo100"),
-                        ft.Text(f"{porcentaje_pagado:.1f}% pagado · Faltan {meses_restantes} meses", size=11, color="indigo", text_align=ft.TextAlign.CENTER),
+                        ft.ProgressBar(value=porcentaje_pagado/100, color=colores["indigo"], bgcolor=colores["indigo_bg"]),
+                        ft.Text(f"{porcentaje_pagado:.1f}% pagado · Faltan {meses_restantes} meses", size=11, color=colores["indigo"], text_align=ft.TextAlign.CENTER),
                         ft.ElevatedButton(
                             "Pagar Mensualidad",
                             icon="payment",
                             on_click=lambda e, x=id_cred: registrar_pago_credito_directo(x),
-                            bgcolor="indigo700",
+                            bgcolor=colores["indigo"],
                             color="white",
                             width=float("inf")
                         )
                     ], spacing=8),
                     padding=12,
                     border_radius=12,
-                    bgcolor="white",
-                    border=ft.border.all(1, "indigo200"),
+                    bgcolor=colores["tarjeta"],
+                    border=ft.border.all(1, colores["borde"]),
                     shadow=ft.BoxShadow(spread_radius=0, blur_radius=4, color="black12", offset=ft.Offset(0, 2))
                 )
                 lista_creditos.controls.append(item)
@@ -1007,6 +2052,7 @@ def main(page: ft.Page):
     
     def crear_vista_ahorros():
         """Crea la vista de ahorros"""
+        colores = obtener_colores()
         lista_ahorros = ft.ListView(spacing=10, padding=10, expand=True)
         
         ahorros = db.obtener_ahorros()
@@ -1015,15 +2061,15 @@ def main(page: ft.Page):
         # Header con total
         header = ft.Container(
             content=ft.Column([
-                ft.Text("🎯 Mis Ahorros", size=20, weight=ft.FontWeight.BOLD),
+                ft.Text("🎯 Mis Ahorros", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                 ft.Divider(height=10, color="transparent"),
                 ft.Row([
-                    ft.Text("Total ahorrado:", size=16, color="grey700"),
-                    ft.Text(f"${total_ahorrado:,.0f}", size=24, weight=ft.FontWeight.BOLD, color="teal")
+                    ft.Text("Total ahorrado:", size=16, color=colores["texto_secundario"]),
+                    ft.Text(f"${total_ahorrado:,.0f}", size=24, weight=ft.FontWeight.BOLD, color=colores["teal"])
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
             ]),
             padding=20,
-            bgcolor="teal50",
+            bgcolor=colores["teal_bg"],
             border_radius=15,
             margin=10
         )
@@ -1032,7 +2078,7 @@ def main(page: ft.Page):
             lista_ahorros.controls.append(
                 ft.Container(
                     content=ft.Text("No tienes metas de ahorro activas.\n¡Empieza a ahorrar para tus objetivos!", 
-                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color="grey"),
+                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color=colores["texto_secundario"]),
                     padding=40
                 )
             )
@@ -1047,14 +2093,14 @@ def main(page: ft.Page):
                 item = ft.Container(
                     content=ft.Column([
                         ft.Row([
-                            ft.Icon("savings", color="teal", size=28),
+                            ft.Icon("savings", color=colores["teal"], size=28),
                             ft.Column([
-                                ft.Text(nombre, weight=ft.FontWeight.BOLD, size=15),
-                                ft.Text(f"Desde {fecha_inicio}", size=12, color="grey600"),
+                                ft.Text(nombre, weight=ft.FontWeight.BOLD, size=15, color=colores["texto"]),
+                                ft.Text(f"Desde {fecha_inicio}", size=12, color=colores["texto_secundario"]),
                             ], expand=True, spacing=2),
                             ft.IconButton(
                                 icon="delete_outline", 
-                                icon_color="grey400",
+                                icon_color=colores["texto_secundario"],
                                 icon_size=20,
                                 tooltip="Eliminar",
                                 on_click=lambda e, x=id_aho: borrar_ahorro(x)
@@ -1063,26 +2109,26 @@ def main(page: ft.Page):
                         ft.Divider(height=5, color="transparent"),
                         ft.Row([
                             ft.Column([
-                                ft.Text("Ahorrado", size=11, color="grey600"),
-                                ft.Text(f"${monto_actual:,.0f}", size=14, weight=ft.FontWeight.BOLD, color="teal"),
+                                ft.Text("Ahorrado", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${monto_actual:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["teal"]),
                             ]),
                             ft.Column([
-                                ft.Text("Falta", size=11, color="grey600"),
-                                ft.Text(f"${falta:,.0f}", size=14, weight=ft.FontWeight.BOLD, color="orange"),
+                                ft.Text("Falta", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${falta:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["naranja"]),
                             ]),
                             ft.Column([
-                                ft.Text("Meta", size=11, color="grey600"),
-                                ft.Text(f"${meta:,.0f}", size=14, weight=ft.FontWeight.BOLD),
+                                ft.Text("Meta", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${meta:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                             ]),
                         ], alignment=ft.MainAxisAlignment.SPACE_AROUND),
-                        ft.ProgressBar(value=porcentaje/100, color="teal", bgcolor="teal100"),
-                        ft.Text(f"{porcentaje:.1f}% completado", size=11, color="teal", text_align=ft.TextAlign.CENTER),
+                        ft.ProgressBar(value=porcentaje/100, color=colores["teal"], bgcolor=colores["teal_bg"]),
+                        ft.Text(f"{porcentaje:.1f}% completado", size=11, color=colores["teal"], text_align=ft.TextAlign.CENTER),
                         ft.Row([
                             ft.ElevatedButton(
                                 "Agregar",
                                 icon="add",
                                 on_click=lambda e, x=id_aho: abrir_agregar_monto(x),
-                                bgcolor="teal700",
+                                bgcolor=colores["teal"],
                                 color="white",
                                 expand=True
                             ),
@@ -1090,7 +2136,7 @@ def main(page: ft.Page):
                                 "Retirar",
                                 icon="remove",
                                 on_click=lambda e, x=id_aho: abrir_retirar_monto(x),
-                                bgcolor="red700",
+                                bgcolor=colores["rojo"],
                                 color="white",
                                 expand=True
                             ),
@@ -1098,8 +2144,8 @@ def main(page: ft.Page):
                     ], spacing=8),
                     padding=12,
                     border_radius=12,
-                    bgcolor="white",
-                    border=ft.border.all(1, "teal200"),
+                    bgcolor=colores["tarjeta"],
+                    border=ft.border.all(1, colores["borde"]),
                     shadow=ft.BoxShadow(spread_radius=0, blur_radius=4, color="black12", offset=ft.Offset(0, 2))
                 )
                 lista_ahorros.controls.append(item)
@@ -1108,6 +2154,7 @@ def main(page: ft.Page):
     
     def crear_vista_bancos():
         """Crea la vista de cuentas bancarias"""
+        colores = obtener_colores()
         lista_bancos = ft.ListView(spacing=10, padding=10, expand=True)
         
         cuentas = db.obtener_cuentas_bancarias()
@@ -1116,15 +2163,15 @@ def main(page: ft.Page):
         # Header con total
         header = ft.Container(
             content=ft.Column([
-                ft.Text("🏦 Mis Cuentas Bancarias", size=20, weight=ft.FontWeight.BOLD),
+                ft.Text("🏦 Mis Cuentas Bancarias", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                 ft.Divider(height=10, color="transparent"),
                 ft.Row([
-                    ft.Text("Saldo total:", size=16, color="grey700"),
-                    ft.Text(f"${total_saldo:,.0f}", size=24, weight=ft.FontWeight.BOLD, color="cyan900")
+                    ft.Text("Saldo total:", size=16, color=colores["texto_secundario"]),
+                    ft.Text(f"${total_saldo:,.0f}", size=24, weight=ft.FontWeight.BOLD, color=colores["cyan"])
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
             ]),
             padding=20,
-            bgcolor="cyan50",
+            bgcolor=colores["cyan_bg"],
             border_radius=15,
             margin=10
         )
@@ -1133,7 +2180,7 @@ def main(page: ft.Page):
             lista_bancos.controls.append(
                 ft.Container(
                     content=ft.Text("No tienes cuentas registradas.\n¡Agrega tus cuentas bancarias!", 
-                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color="grey"),
+                                   italic=True, text_align=ft.TextAlign.CENTER, size=14, color=colores["texto_secundario"]),
                     padding=40
                 )
             )
@@ -1144,12 +2191,12 @@ def main(page: ft.Page):
                 
                 # Iconos y colores según tipo de cuenta
                 iconos = {
-                    "debito": ("payment", "blue"),
-                    "credito": ("credit_card", "orange"),
-                    "ahorro": ("savings", "green"),
-                    "inversion": ("trending_up", "purple")
+                    "debito": ("payment", colores["azul"]),
+                    "credito": ("credit_card", colores["naranja"]),
+                    "ahorro": ("savings", colores["verde"]),
+                    "inversion": ("trending_up", colores["purple"])
                 }
-                icono, color = iconos.get(tipo_cuenta, ("account_balance", "cyan"))
+                icono, color = iconos.get(tipo_cuenta, ("account_balance", colores["cyan"]))
                 
                 # Mostrar información adicional para tarjetas de crédito
                 info_adicional = ""
@@ -1162,12 +2209,12 @@ def main(page: ft.Page):
                         ft.Row([
                             ft.Icon(icono, color=color, size=28),
                             ft.Column([
-                                ft.Text(nombre_banco, weight=ft.FontWeight.BOLD, size=15),
-                                ft.Text(f"{tipo_cuenta.capitalize()} · {fecha_creacion}", size=12, color="grey600"),
+                                ft.Text(nombre_banco, weight=ft.FontWeight.BOLD, size=15, color=colores["texto"]),
+                                ft.Text(f"{tipo_cuenta.capitalize()} · {fecha_creacion}", size=12, color=colores["texto_secundario"]),
                             ], expand=True, spacing=2),
                             ft.IconButton(
                                 icon="delete_outline", 
-                                icon_color="grey400",
+                                icon_color=colores["texto_secundario"],
                                 icon_size=20,
                                 tooltip="Eliminar",
                                 on_click=lambda e, x=id_cuenta: borrar_cuenta_bancaria(x)
@@ -1176,12 +2223,12 @@ def main(page: ft.Page):
                         ft.Divider(height=5, color="transparent"),
                         ft.Container(
                             content=ft.Column([
-                                ft.Text("Saldo actual", size=12, color="grey600"),
-                                ft.Text(f"${saldo:,.0f}", size=24, weight=ft.FontWeight.BOLD, color="cyan900"),
-                                ft.Text(info_adicional, size=11, color="grey600") if info_adicional else ft.Container(),
+                                ft.Text("Saldo actual", size=12, color=colores["texto_secundario"]),
+                                ft.Text(f"${saldo:,.0f}", size=24, weight=ft.FontWeight.BOLD, color=colores["cyan"]),
+                                ft.Text(info_adicional, size=11, color=colores["texto_secundario"]) if info_adicional else ft.Container(),
                             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                             padding=10,
-                            bgcolor="cyan50",
+                            bgcolor=colores["cyan_bg"],
                             border_radius=8,
                         ),
                         ft.Divider(height=5, color="transparent"),
@@ -1190,7 +2237,7 @@ def main(page: ft.Page):
                                 "Depositar",
                                 icon="add",
                                 on_click=lambda e, x=id_cuenta: abrir_depositar_banco(x),
-                                bgcolor="green700",
+                                bgcolor=colores["verde"],
                                 color="white",
                                 expand=True
                             ),
@@ -1198,7 +2245,7 @@ def main(page: ft.Page):
                                 "Retirar",
                                 icon="remove",
                                 on_click=lambda e, x=id_cuenta: abrir_retirar_banco(x),
-                                bgcolor="red700",
+                                bgcolor=colores["rojo"],
                                 color="white",
                                 expand=True
                             ),
@@ -1206,8 +2253,8 @@ def main(page: ft.Page):
                     ], spacing=8),
                     padding=12,
                     border_radius=12,
-                    bgcolor="white",
-                    border=ft.border.all(1, "cyan200"),
+                    bgcolor=colores["tarjeta"],
+                    border=ft.border.all(1, colores["borde"]),
                     shadow=ft.BoxShadow(spread_radius=0, blur_radius=4, color="black12", offset=ft.Offset(0, 2))
                 )
                 lista_bancos.controls.append(item)
@@ -1323,7 +2370,8 @@ def main(page: ft.Page):
             return False, str(e)
     
     def crear_vista_balance_mensual():
-        """Crea la vista de balance mensual"""
+        """Crea la vista de balance mensual con gráficos"""
+        colores = obtener_colores()
         ahora = datetime.datetime.now()
         mes_actual = ahora.month
         anio_actual = ahora.year
@@ -1331,10 +2379,21 @@ def main(page: ft.Page):
         ingresos_mes, gastos_mes = db.obtener_balance_mensual(mes_actual, anio_actual)
         total_subs = db.obtener_total_suscripciones()
         total_cuotas = db.obtener_total_cuotas_prestamos()
-        balance_mes = ingresos_mes - gastos_mes - total_subs - total_cuotas
+        total_creditos = db.obtener_total_cuotas_creditos()
+        balance_mes = ingresos_mes - gastos_mes - total_subs - total_cuotas - total_creditos
         
         meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
         mes_nombre = meses[mes_actual - 1]
+        
+        # Obtener gastos por categoría para el gráfico
+        gastos_categoria = db.obtener_gastos_por_categoria(mes_actual, anio_actual)
+        
+        # Colores para las categorías
+        colores_cat = {
+            "Comida": "#FF6384", "Transporte": "#36A2EB", "Servicios": "#FFCE56",
+            "Ocio": "#4BC0C0", "Salud": "#9966FF", "Salario": "#2ECC71",
+            "Compras": "#FF9F40", "Educación": "#E74C3C", "Otro": "#95A5A6"
+        }
         
         def exportar_excel(e):
             exito, mensaje = exportar_movimientos_a_excel(mes_actual, anio_actual)
@@ -1342,7 +2401,7 @@ def main(page: ft.Page):
                 page.show_snack_bar(
                     ft.SnackBar(
                         content=ft.Text(f"✅ Excel exportado: {mensaje}"),
-                        bgcolor="green",
+                        bgcolor=colores["verde"],
                         duration=5000
                     )
                 )
@@ -1350,109 +2409,230 @@ def main(page: ft.Page):
                 page.show_snack_bar(
                     ft.SnackBar(
                         content=ft.Text(f"❌ Error: {mensaje}"),
-                        bgcolor="red",
+                        bgcolor=colores["rojo"],
                         duration=5000
                     )
                 )
+        
+        # Crear gráfico de barras por categoría
+        def crear_grafico_categorias():
+            if not gastos_categoria:
+                return ft.Container(
+                    content=ft.Text("Sin gastos este mes", color=colores["texto_secundario"], italic=True),
+                    padding=20,
+                    alignment=ft.alignment.center
+                )
+            
+            total_gastos = sum([g[1] for g in gastos_categoria])
+            max_gasto = max([g[1] for g in gastos_categoria]) if gastos_categoria else 1
+            
+            barras = []
+            for cat, monto in gastos_categoria:
+                porcentaje = (monto / total_gastos * 100) if total_gastos > 0 else 0
+                ancho_barra = (monto / max_gasto) if max_gasto > 0 else 0
+                color = colores_cat.get(cat, "#95A5A6")
+                
+                barras.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([
+                                ft.Text(cat, size=12, weight=ft.FontWeight.W_500, expand=True, color=colores["texto"]),
+                                ft.Text(f"${monto:,.0f}", size=12, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                                ft.Text(f"({porcentaje:.1f}%)", size=11, color=colores["texto_secundario"]),
+                            ]),
+                            ft.Container(
+                                content=ft.Container(
+                                    width=ancho_barra * 280,
+                                    height=20,
+                                    bgcolor=color,
+                                    border_radius=5,
+                                ),
+                                bgcolor=colores["borde"],
+                                border_radius=5,
+                                width=280,
+                                height=20,
+                            )
+                        ], spacing=5),
+                        padding=ft.padding.only(bottom=10)
+                    )
+                )
+            
+            return ft.Container(
+                content=ft.Column([
+                    ft.Text("📊 Gastos por Categoría", size=16, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                    ft.Divider(height=10, color="transparent"),
+                    *barras
+                ]),
+                padding=15,
+                bgcolor=colores["gris_bg"],
+                border_radius=12,
+                margin=ft.margin.only(top=10, bottom=10)
+            )
+        
+        # Crear mini gráfico de tendencia
+        def crear_tendencia_mensual():
+            datos_meses = db.obtener_balance_ultimos_meses(6)
+            
+            if not datos_meses:
+                return ft.Container()
+            
+            max_valor = max([max(d["ingresos"], d["gastos"]) for d in datos_meses]) if datos_meses else 1
+            
+            barras_tendencia = []
+            for d in datos_meses:
+                altura_ing = (d["ingresos"] / max_valor * 60) if max_valor > 0 else 0
+                altura_gas = (d["gastos"] / max_valor * 60) if max_valor > 0 else 0
+                
+                barras_tendencia.append(
+                    ft.Column([
+                        ft.Row([
+                            ft.Container(width=15, height=altura_ing, bgcolor=colores["verde"], border_radius=3),
+                            ft.Container(width=15, height=altura_gas, bgcolor=colores["rojo"], border_radius=3),
+                        ], spacing=2, alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Text(d["mes"], size=10, color=colores["texto_secundario"])
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5)
+                )
+            
+            return ft.Container(
+                content=ft.Column([
+                    ft.Text("📈 Tendencia 6 Meses", size=16, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                    ft.Row([
+                        ft.Row([ft.Container(width=10, height=10, bgcolor=colores["verde"], border_radius=2), ft.Text("Ingresos", size=10, color=colores["texto"])]),
+                        ft.Row([ft.Container(width=10, height=10, bgcolor=colores["rojo"], border_radius=2), ft.Text("Gastos", size=10, color=colores["texto"])]),
+                    ], spacing=20),
+                    ft.Divider(height=10, color="transparent"),
+                    ft.Row(barras_tendencia, alignment=ft.MainAxisAlignment.SPACE_AROUND),
+                ]),
+                padding=15,
+                bgcolor=colores["azul_bg"],
+                border_radius=12,
+                margin=ft.margin.only(top=10)
+            )
         
         return ft.Column([
             ft.Container(
                 content=ft.Column([
                     ft.Row([
-                        ft.Text(f"📊 Balance de {mes_nombre} {anio_actual}", size=20, weight=ft.FontWeight.BOLD, expand=True),
+                        ft.Text(f"📊 Balance de {mes_nombre} {anio_actual}", size=20, weight=ft.FontWeight.BOLD, expand=True, color=colores["texto"]),
                         ft.IconButton(
                             icon="download",
-                            icon_color="green",
+                            icon_color=colores["verde"],
                             tooltip="Exportar a Excel",
                             on_click=exportar_excel,
                             icon_size=28
                         )
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    ft.Divider(height=20, color="transparent"),
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("Ingresos del mes", size=14, color="grey700"),
-                            ft.Text(f"${ingresos_mes:,.0f}", size=28, weight=ft.FontWeight.BOLD, color="green"),
-                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                        padding=15,
-                        bgcolor="green50",
-                        border_radius=10,
-                    ),
                     ft.Divider(height=10, color="transparent"),
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("Gastos del mes", size=14, color="grey700"),
-                            ft.Text(f"${gastos_mes:,.0f}", size=28, weight=ft.FontWeight.BOLD, color="red"),
-                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                        padding=15,
-                        bgcolor="red50",
-                        border_radius=10,
-                    ),
+                    # Resumen en cards
+                    ft.Row([
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Icon("trending_up", color=colores["verde"], size=24),
+                                ft.Text("Ingresos", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${ingresos_mes:,.0f}", size=16, weight=ft.FontWeight.BOLD, color=colores["verde"]),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                            padding=12,
+                            bgcolor=colores["verde_bg"],
+                            border_radius=10,
+                            expand=True
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Icon("trending_down", color=colores["rojo"], size=24),
+                                ft.Text("Gastos", size=11, color=colores["texto_secundario"]),
+                                ft.Text(f"${gastos_mes:,.0f}", size=16, weight=ft.FontWeight.BOLD, color=colores["rojo"]),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                            padding=12,
+                            bgcolor=colores["rojo_bg"],
+                            border_radius=10,
+                            expand=True
+                        ),
+                    ], spacing=10),
                     ft.Divider(height=10, color="transparent"),
+                    ft.Row([
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Suscripciones", size=10, color=colores["texto_secundario"]),
+                                ft.Text(f"${total_subs:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["naranja"]),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                            padding=10,
+                            bgcolor=colores["naranja_bg"],
+                            border_radius=8,
+                            expand=True
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Préstamos", size=10, color=colores["texto_secundario"]),
+                                ft.Text(f"${total_cuotas:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["purple"]),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                            padding=10,
+                            bgcolor=colores["purple_bg"],
+                            border_radius=8,
+                            expand=True
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Créditos", size=10, color=colores["texto_secundario"]),
+                                ft.Text(f"${total_creditos:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["indigo"]),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                            padding=10,
+                            bgcolor=colores["indigo_bg"],
+                            border_radius=8,
+                            expand=True
+                        ),
+                    ], spacing=8),
+                    ft.Divider(height=15, color="transparent"),
+                    # Balance final
                     ft.Container(
                         content=ft.Column([
-                            ft.Text("Suscripciones mensuales", size=14, color="grey700"),
-                            ft.Text(f"${total_subs:,.0f}", size=28, weight=ft.FontWeight.BOLD, color="orange"),
-                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                        padding=15,
-                        bgcolor="orange50",
-                        border_radius=10,
-                    ),
-                    ft.Divider(height=10, color="transparent"),
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("Cuotas de préstamos", size=14, color="grey700"),
-                            ft.Text(f"${total_cuotas:,.0f}", size=28, weight=ft.FontWeight.BOLD, color="purple"),
-                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                        padding=15,
-                        bgcolor="purple50",
-                        border_radius=10,
-                    ),
-                    ft.Divider(height=20, color="transparent"),
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("Balance Final", size=16, color="grey700", weight=ft.FontWeight.BOLD),
-                            ft.Text(f"${balance_mes:,.0f}", size=36, weight=ft.FontWeight.BOLD, 
-                                   color="green" if balance_mes >= 0 else "red"),
+                            ft.Text("💰 Balance Final del Mes", size=14, color=colores["texto_secundario"]),
+                            ft.Text(f"${balance_mes:,.0f}", size=32, weight=ft.FontWeight.BOLD, 
+                                   color=colores["verde"] if balance_mes >= 0 else colores["rojo"]),
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                         padding=20,
-                        bgcolor="blue50",
+                        bgcolor=colores["tarjeta"],
                         border_radius=15,
-                        border=ft.border.all(2, "blue700"),
+                        border=ft.border.all(2, colores["verde"] if balance_mes >= 0 else colores["rojo"]),
+                        shadow=ft.BoxShadow(spread_radius=1, blur_radius=8, color="black12", offset=ft.Offset(0, 2))
                     ),
+                    # Gráfico de categorías
+                    crear_grafico_categorias(),
+                    # Tendencia mensual
+                    crear_tendencia_mensual(),
                 ]),
-                padding=20,
+                padding=15,
                 expand=True
             )
         ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
     
     def crear_resumen_balance():
         """Crea el widget de resumen de balance"""
+        colores = obtener_colores()
         return ft.Container(
             content=ft.Column([
-                ft.Text("Balance Total", size=14, color="grey700", weight=ft.FontWeight.W_500),
+                ft.Text("Balance Total", size=14, color=colores["texto_secundario"], weight=ft.FontWeight.W_500),
                 txt_balance_total,
                 ft.Divider(height=5, color="transparent"),
                 ft.Row([
                     ft.Container(
                         content=ft.Column([
-                            ft.Icon("arrow_upward", color="green", size=18),
-                            ft.Text("Ingresos", size=11, color="grey600"),
+                            ft.Icon("arrow_upward", color=colores["verde"], size=18),
+                            ft.Text("Ingresos", size=11, color=colores["texto_secundario"]),
                             txt_ingresos
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                         padding=8,
-                        bgcolor="green50",
+                        bgcolor=colores["verde_bg"],
                         border_radius=8,
                         expand=True
                     ),
                     ft.Container(
                         content=ft.Column([
-                            ft.Icon("arrow_downward", color="red", size=18),
-                            ft.Text("Gastos", size=11, color="grey600"),
+                            ft.Icon("arrow_downward", color=colores["rojo"], size=18),
+                            ft.Text("Gastos", size=11, color=colores["texto_secundario"]),
                             txt_gastos
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                         padding=8,
-                        bgcolor="red50",
+                        bgcolor=colores["rojo_bg"],
                         border_radius=8,
                         expand=True
                     ),
@@ -1461,23 +2641,23 @@ def main(page: ft.Page):
                 ft.Row([
                     ft.Container(
                         content=ft.Column([
-                            ft.Icon("subscriptions", color="orange", size=18),
-                            ft.Text("Suscripciones", size=11, color="grey600"),
+                            ft.Icon("subscriptions", color=colores["naranja"], size=18),
+                            ft.Text("Suscripciones", size=11, color=colores["texto_secundario"]),
                             txt_suscripciones
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                         padding=8,
-                        bgcolor="orange50",
+                        bgcolor=colores["naranja_bg"],
                         border_radius=8,
                         expand=True
                     ),
                     ft.Container(
                         content=ft.Column([
-                            ft.Icon("account_balance", color="purple", size=18),
-                            ft.Text("Préstamos", size=11, color="grey600"),
+                            ft.Icon("account_balance", color=colores["purple"], size=18),
+                            ft.Text("Préstamos", size=11, color=colores["texto_secundario"]),
                             txt_prestamos
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                         padding=8,
-                        bgcolor="purple50",
+                        bgcolor=colores["purple_bg"],
                         border_radius=8,
                         expand=True
                     ),
@@ -1486,23 +2666,23 @@ def main(page: ft.Page):
                 ft.Row([
                     ft.Container(
                         content=ft.Column([
-                            ft.Icon("credit_card", color="indigo", size=18),
-                            ft.Text("Créditos", size=11, color="grey600"),
+                            ft.Icon("credit_card", color=colores["indigo"], size=18),
+                            ft.Text("Créditos", size=11, color=colores["texto_secundario"]),
                             txt_creditos
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                         padding=8,
-                        bgcolor="indigo50",
+                        bgcolor=colores["indigo_bg"],
                         border_radius=8,
                         expand=True
                     ),
                     ft.Container(
                         content=ft.Column([
-                            ft.Icon("savings", color="teal", size=18),
-                            ft.Text("Ahorros", size=11, color="grey600"),
+                            ft.Icon("savings", color=colores["teal"], size=18),
+                            ft.Text("Ahorros", size=11, color=colores["texto_secundario"]),
                             txt_ahorros
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                         padding=8,
-                        bgcolor="teal50",
+                        bgcolor=colores["teal_bg"],
                         border_radius=8,
                         expand=True
                     ),
@@ -1511,23 +2691,23 @@ def main(page: ft.Page):
                 ft.Row([
                     ft.Container(
                         content=ft.Column([
-                            ft.Icon("account_balance", color="cyan900", size=18),
-                            ft.Text("En Bancos", size=11, color="grey600"),
+                            ft.Icon("account_balance", color=colores["cyan"], size=18),
+                            ft.Text("En Bancos", size=11, color=colores["texto_secundario"]),
                             txt_bancos
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                         padding=8,
-                        bgcolor="cyan50",
+                        bgcolor=colores["cyan_bg"],
                         border_radius=8,
                         expand=True
                     ),
                     ft.Container(
                         content=ft.Column([
-                            ft.Icon("account_balance_wallet", color="blue700", size=18),
-                            ft.Text("Disponible", size=11, color="grey600"),
+                            ft.Icon("account_balance_wallet", color=colores["azul"], size=18),
+                            ft.Text("Disponible", size=11, color=colores["texto_secundario"]),
                             txt_disponible
                         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                         padding=8,
-                        bgcolor="blue50",
+                        bgcolor=colores["azul_bg"],
                         border_radius=8,
                         expand=True
                     ),
@@ -1535,34 +2715,10 @@ def main(page: ft.Page):
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5),
             padding=15,
             margin=10,
-            bgcolor="white",
+            bgcolor=colores["tarjeta"],
             border_radius=15,
             shadow=ft.BoxShadow(spread_radius=0, blur_radius=8, color="black12", offset=ft.Offset(0, 2))
         )
-    
-    def actualizar_vista():
-        """Actualiza la vista actual"""
-        nonlocal vista_actual
-        
-        actualizar_balance()
-        contenedor_principal.controls.clear()
-        
-        if vista_actual == "inicio":
-            contenedor_principal.controls.append(crear_vista_inicio())
-        elif vista_actual == "suscripciones":
-            contenedor_principal.controls.append(crear_vista_suscripciones())
-        elif vista_actual == "prestamos":
-            contenedor_principal.controls.append(crear_vista_prestamos())
-        elif vista_actual == "creditos":
-            contenedor_principal.controls.append(crear_vista_creditos())
-        elif vista_actual == "ahorros":
-            contenedor_principal.controls.append(crear_vista_ahorros())
-        elif vista_actual == "bancos":
-            contenedor_principal.controls.append(crear_vista_bancos())
-        elif vista_actual == "balance":
-            contenedor_principal.controls.append(crear_vista_balance_mensual())
-        
-        page.update()
 
     def guardar_movimiento(e):
         # Limpiar errores previos
@@ -1841,11 +2997,6 @@ def main(page: ft.Page):
     def borrar_cuenta_bancaria(id_cuenta):
         if db.borrar_cuenta_bancaria(id_cuenta):
             actualizar_vista()
-
-    def cambiar_vista(e):
-        nonlocal vista_actual
-        vista_actual = ["inicio", "suscripciones", "prestamos", "creditos", "ahorros", "bancos", "balance"][e.control.selected_index]
-        actualizar_vista()
 
     # --- Elementos de Navegación y Estructura ---
     
@@ -2459,33 +3610,580 @@ def main(page: ft.Page):
         
         page.update()
 
-    # Barra superior
+    # =====================================================
+    # FUNCIONES DE EDICIÓN
+    # =====================================================
+    
+    def abrir_editar_movimiento(mov):
+        """Abre el formulario para editar un movimiento"""
+        if len(mov) == 7:
+            id_mov, tipo, cat, monto, desc, fecha, modo = mov
+        else:
+            id_mov, tipo, cat, monto, desc, fecha = mov
+        
+        registro_editando[0] = "movimiento"
+        registro_editando[1] = id_mov
+        
+        input_desc.value = desc
+        input_monto.value = str(monto)
+        dropdown_tipo.value = tipo
+        dropdown_cat.value = cat
+        
+        bottom_sheet_movimiento.open = True
+        page.update()
+    
+    def abrir_editar_suscripcion(sub):
+        """Abre el formulario para editar una suscripción"""
+        id_sub, nombre, monto, dia_cobro, activa = sub
+        
+        registro_editando[0] = "suscripcion"
+        registro_editando[1] = id_sub
+        
+        input_sub_nombre.value = nombre
+        input_sub_monto.value = str(monto)
+        input_sub_dia.value = str(dia_cobro)
+        
+        bottom_sheet_suscripcion.open = True
+        page.update()
+    
+    def abrir_editar_prestamo(pres):
+        """Abre el formulario para editar un préstamo"""
+        id_pres, banco, monto_total, monto_pagado, cuota_mensual, dia_pago, fecha_inicio, activo = pres
+        
+        registro_editando[0] = "prestamo"
+        registro_editando[1] = id_pres
+        
+        input_prest_banco.value = banco
+        input_prest_monto_total.value = str(monto_total)
+        input_prest_cuota.value = str(cuota_mensual)
+        input_prest_dia.value = str(dia_pago)
+        
+        bottom_sheet_prestamo.open = True
+        page.update()
+    
+    def abrir_editar_ahorro(aho):
+        """Abre el formulario para editar un ahorro"""
+        id_aho, nombre, meta, monto_actual, fecha_inicio, completado = aho
+        
+        registro_editando[0] = "ahorro"
+        registro_editando[1] = id_aho
+        
+        input_ahorro_nombre.value = nombre
+        input_ahorro_meta.value = str(meta)
+        
+        bottom_sheet_ahorro.open = True
+        page.update()
+    
+    # =====================================================
+    # VISTA DE CONFIGURACIÓN
+    # =====================================================
+    
+    def crear_vista_configuracion():
+        """Crea la vista de configuración"""
+        colores = obtener_colores()
+        tema_actual = db.obtener_tema()
+        es_oscuro = tema_actual == "dark"
+        
+        def cambiar_tema(e):
+            nuevo_tema = "dark" if e.control.value else "light"
+            db.guardar_tema(nuevo_tema)
+            page.theme_mode = ft.ThemeMode.DARK if nuevo_tema == "dark" else ft.ThemeMode.LIGHT
+            page.update()
+            actualizar_vista()
+        
+        def cambiar_pin(e):
+            """Abre el diálogo para cambiar PIN"""
+            # Limpiar campos
+            for p in pin_inputs:
+                p.value = ""
+            txt_pin_titulo.value = "Crear nuevo PIN"
+            txt_pin_mensaje.value = ""
+            contenedor_login.visible = True
+            contenedor_app.visible = False
+            btn_saltar_pin.visible = True
+            page.update()
+        
+        def exportar_backup(e):
+            """Exporta todos los datos"""
+            try:
+                datos = db.exportar_datos()
+                if datos:
+                    nombre_archivo = f"JFinanzas_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    ruta_documentos = os.path.join(os.path.expanduser('~'), 'Documents')
+                    ruta_completa = os.path.join(ruta_documentos, nombre_archivo)
+                    
+                    with open(ruta_completa, 'w', encoding='utf-8') as f:
+                        f.write(datos)
+                    
+                    page.show_snack_bar(
+                        ft.SnackBar(
+                            content=ft.Text(f"✅ Backup guardado en: {ruta_completa}"),
+                            bgcolor=colores["verde"],
+                            duration=5000
+                        )
+                    )
+                else:
+                    page.show_snack_bar(
+                        ft.SnackBar(content=ft.Text("❌ Error al exportar"), bgcolor=colores["rojo"])
+                    )
+            except Exception as ex:
+                page.show_snack_bar(
+                    ft.SnackBar(content=ft.Text(f"❌ Error: {ex}"), bgcolor=colores["rojo"])
+                )
+        
+        # FilePicker para importar backup
+        def resultado_file_picker(e: ft.FilePickerResultEvent):
+            if e.files and len(e.files) > 0:
+                archivo = e.files[0]
+                try:
+                    with open(archivo.path, 'r', encoding='utf-8') as f:
+                        json_data = f.read()
+                    
+                    if db.importar_datos(json_data):
+                        page.show_snack_bar(
+                            ft.SnackBar(
+                                content=ft.Text("✅ Datos importados correctamente. Reinicia la app para ver los cambios."),
+                                bgcolor=colores["verde"],
+                                duration=5000
+                            )
+                        )
+                        actualizar_vista()
+                    else:
+                        page.show_snack_bar(
+                            ft.SnackBar(content=ft.Text("❌ Error al importar datos"), bgcolor=colores["rojo"])
+                        )
+                except Exception as ex:
+                    page.show_snack_bar(
+                        ft.SnackBar(content=ft.Text(f"❌ Error: {ex}"), bgcolor=colores["rojo"])
+                    )
+        
+        file_picker = ft.FilePicker(on_result=resultado_file_picker)
+        page.overlay.append(file_picker)
+        
+        def importar_backup(e):
+            """Abre el selector de archivos para importar"""
+            file_picker.pick_files(
+                allowed_extensions=["json"],
+                dialog_title="Selecciona el archivo de backup",
+                file_type=ft.FilePickerFileType.CUSTOM
+            )
+        
+        return ft.Column([
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("⚙️ Configuración", size=24, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                    ft.Divider(height=20, color=colores["borde"]),
+                    
+                    # Tema
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon("dark_mode", color=colores["purple"]),
+                            ft.Column([
+                                ft.Text("Modo Oscuro", weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                                ft.Text("Cambia la apariencia de la app", size=12, color=colores["texto_secundario"]),
+                            ], expand=True, spacing=2),
+                            ft.Switch(value=es_oscuro, on_change=cambiar_tema)
+                        ]),
+                        padding=15,
+                        bgcolor=colores["purple_bg"],
+                        border_radius=10,
+                    ),
+                    ft.Divider(height=10, color="transparent"),
+                    
+                    # Seguridad
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon("lock", color=colores["azul"]),
+                            ft.Column([
+                                ft.Text("Cambiar PIN", weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                                ft.Text("Modifica tu PIN de acceso", size=12, color=colores["texto_secundario"]),
+                            ], expand=True, spacing=2),
+                            ft.IconButton(icon="chevron_right", on_click=cambiar_pin, icon_color=colores["texto"])
+                        ]),
+                        padding=15,
+                        bgcolor=colores["azul_bg"],
+                        border_radius=10,
+                    ),
+                    ft.Divider(height=10, color="transparent"),
+                    
+                    # Backup - Exportar
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon("backup", color=colores["verde"]),
+                            ft.Column([
+                                ft.Text("Exportar Backup", weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                                ft.Text("Guarda todos tus datos en JSON", size=12, color=colores["texto_secundario"]),
+                            ], expand=True, spacing=2),
+                            ft.IconButton(icon="download", on_click=exportar_backup, icon_color=colores["texto"])
+                        ]),
+                        padding=15,
+                        bgcolor=colores["verde_bg"],
+                        border_radius=10,
+                    ),
+                    ft.Divider(height=10, color="transparent"),
+                    
+                    # Backup - Importar
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon("cloud_upload", color=colores["cyan"]),
+                            ft.Column([
+                                ft.Text("Importar Backup", weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                                ft.Text("Restaura datos desde archivo JSON", size=12, color=colores["texto_secundario"]),
+                            ], expand=True, spacing=2),
+                            ft.IconButton(icon="upload_file", on_click=importar_backup, icon_color=colores["texto"])
+                        ]),
+                        padding=15,
+                        bgcolor=colores["cyan_bg"],
+                        border_radius=10,
+                    ),
+                    ft.Divider(height=20, color="transparent"),
+                    
+                    # Info de la app
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Text("📱 Mis Finanzas", size=18, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                            ft.Text("Versión 2.0", size=14, color=colores["texto_secundario"]),
+                            ft.Text("Gestiona tus finanzas de forma inteligente", size=12, color=colores["texto_secundario"]),
+                            ft.Divider(height=10, color="transparent"),
+                            ft.Row([
+                                ft.Icon("code", size=16, color=colores["texto_secundario"]),
+                                ft.Text("Desarrollado con Flet + Python", size=11, color=colores["texto_secundario"]),
+                            ], spacing=5)
+                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                        padding=20,
+                        bgcolor=colores["gris_bg"],
+                        border_radius=15,
+                        alignment=ft.alignment.center
+                    ),
+                ]),
+                padding=20,
+                expand=True
+            )
+        ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
+    
+    # =====================================================
+    # VISTA DE PRESUPUESTOS
+    # =====================================================
+    
+    def crear_vista_presupuestos():
+        """Crea la vista de presupuestos por categoría"""
+        colores = obtener_colores()
+        lista_presupuestos = ft.ListView(spacing=10, padding=10, expand=True)
+        
+        presupuestos = db.obtener_presupuestos()
+        
+        # Header
+        header = ft.Container(
+            content=ft.Column([
+                ft.Text("📋 Presupuestos por Categoría", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                ft.Divider(height=10, color="transparent"),
+                ft.Text("Define límites de gasto para cada categoría y controla mejor tus finanzas.", 
+                       size=14, color=colores["texto_secundario"]),
+            ]),
+            padding=20,
+            bgcolor=colores["naranja_bg"],
+            border_radius=15,
+            margin=10
+        )
+        
+        categorias = ["Comida", "Transporte", "Servicios", "Ocio", "Salud", "Compras", "Educación", "Otro"]
+        
+        for cat in categorias:
+            # Buscar si hay presupuesto definido
+            presupuesto_cat = next((p for p in presupuestos if p[1] == cat), None)
+            limite = presupuesto_cat[2] if presupuesto_cat else 0
+            id_pres = presupuesto_cat[0] if presupuesto_cat else None
+            
+            gasto_actual = db.obtener_gasto_categoria_mes(cat)
+            porcentaje = (gasto_actual / limite * 100) if limite > 0 else 0
+            
+            # Color según el porcentaje
+            if porcentaje >= 100:
+                color_progreso = colores["rojo"]
+                estado = "⚠️ Excedido"
+            elif porcentaje >= 80:
+                color_progreso = colores["naranja"]
+                estado = "⚡ Cerca del límite"
+            else:
+                color_progreso = colores["verde"]
+                estado = "✅ Dentro del presupuesto"
+            
+            item = ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Text(cat, weight=ft.FontWeight.BOLD, size=15, color=colores["texto"]),
+                        ft.Text(estado if limite > 0 else "Sin límite", size=12, 
+                               color=color_progreso if limite > 0 else colores["texto_secundario"]),
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    ft.Row([
+                        ft.Text(f"Gastado: ${gasto_actual:,.0f}", size=13, color=colores["texto"]),
+                        ft.Text(f"Límite: ${limite:,.0f}" if limite > 0 else "No definido", 
+                               size=13, color=colores["texto_secundario"]),
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    ft.ProgressBar(
+                        value=min(porcentaje/100, 1) if limite > 0 else 0,
+                        color=color_progreso,
+                        bgcolor=colores["borde"]
+                    ) if limite > 0 else ft.Container(),
+                    ft.Row([
+                        ft.TextField(
+                            hint_text="Límite",
+                            keyboard_type=ft.KeyboardType.NUMBER,
+                            width=120,
+                            height=40,
+                            text_size=14,
+                            data=cat
+                        ),
+                        ft.ElevatedButton(
+                            "Guardar",
+                            bgcolor=colores["naranja"],
+                            color="white",
+                            height=40,
+                            on_click=lambda e, c=cat: guardar_presupuesto_cat(e, c)
+                        ),
+                        ft.IconButton(
+                            icon="delete",
+                            icon_color=colores["rojo"],
+                            tooltip="Eliminar límite",
+                            on_click=lambda e, i=id_pres, c=cat: confirmar_borrado("presupuesto", i, f"presupuesto de {c}") if i else None,
+                            visible=limite > 0
+                        )
+                    ], spacing=10)
+                ], spacing=8),
+                padding=15,
+                bgcolor=colores["tarjeta"],
+                border_radius=12,
+                border=ft.border.all(1, colores["borde"])
+            )
+            lista_presupuestos.controls.append(item)
+        
+        return ft.Column([header, lista_presupuestos], spacing=0, expand=True)
+    
+    def guardar_presupuesto_cat(e, categoria):
+        """Guarda el presupuesto de una categoría"""
+        # Buscar el TextField correspondiente
+        for control in e.control.parent.controls:
+            if isinstance(control, ft.TextField) and control.data == categoria:
+                try:
+                    limite = float(control.value)
+                    if limite > 0:
+                        db.agregar_presupuesto(categoria, limite)
+                        actualizar_vista()
+                        page.show_snack_bar(
+                            ft.SnackBar(content=ft.Text(f"✅ Presupuesto de {categoria} guardado"), bgcolor="green")
+                        )
+                except:
+                    page.show_snack_bar(
+                        ft.SnackBar(content=ft.Text("❌ Ingresa un número válido"), bgcolor="red")
+                    )
+                break
+    
+    # =====================================================
+    # VISTA DE TRANSFERENCIAS
+    # =====================================================
+    
+    def crear_vista_transferencias():
+        """Crea la vista de transferencias entre cuentas"""
+        colores = obtener_colores()
+        cuentas = db.obtener_cuentas_bancarias()
+        transferencias = db.obtener_transferencias()
+        
+        # Header con formulario de transferencia
+        opciones_cuentas = [ft.dropdown.Option(str(c[0]), f"{c[1]} ({c[2]})") for c in cuentas]
+        
+        dropdown_origen = ft.Dropdown(
+            label="Cuenta origen",
+            options=opciones_cuentas,
+            width=150
+        )
+        
+        dropdown_destino = ft.Dropdown(
+            label="Cuenta destino",
+            options=opciones_cuentas,
+            width=150
+        )
+        
+        input_monto_trans = ft.TextField(
+            label="Monto",
+            keyboard_type=ft.KeyboardType.NUMBER,
+            width=120
+        )
+        
+        def realizar_transferencia_click(e):
+            if not dropdown_origen.value or not dropdown_destino.value or not input_monto_trans.value:
+                page.show_snack_bar(
+                    ft.SnackBar(content=ft.Text("❌ Completa todos los campos"), bgcolor=colores["rojo"])
+                )
+                return
+            
+            if dropdown_origen.value == dropdown_destino.value:
+                page.show_snack_bar(
+                    ft.SnackBar(content=ft.Text("❌ Las cuentas deben ser diferentes"), bgcolor=colores["rojo"])
+                )
+                return
+            
+            try:
+                monto = float(input_monto_trans.value)
+                if monto <= 0:
+                    raise ValueError()
+                
+                if db.realizar_transferencia(int(dropdown_origen.value), int(dropdown_destino.value), monto):
+                    page.show_snack_bar(
+                        ft.SnackBar(content=ft.Text("✅ Transferencia realizada"), bgcolor=colores["verde"])
+                    )
+                    dropdown_origen.value = None
+                    dropdown_destino.value = None
+                    input_monto_trans.value = ""
+                    actualizar_vista()
+                else:
+                    page.show_snack_bar(
+                        ft.SnackBar(content=ft.Text("❌ Error en la transferencia"), bgcolor=colores["rojo"])
+                    )
+            except:
+                page.show_snack_bar(
+                    ft.SnackBar(content=ft.Text("❌ Monto inválido"), bgcolor=colores["rojo"])
+                )
+        
+        header = ft.Container(
+            content=ft.Column([
+                ft.Text("🔄 Transferir entre Cuentas", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                ft.Divider(height=10, color="transparent"),
+                ft.Row([dropdown_origen, ft.Icon("arrow_forward", color=colores["texto"]), dropdown_destino], 
+                       alignment=ft.MainAxisAlignment.CENTER, spacing=10),
+                ft.Row([
+                    input_monto_trans,
+                    ft.ElevatedButton("Transferir", icon="send", bgcolor=colores["cyan"], color="white",
+                                     on_click=realizar_transferencia_click)
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=10)
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=20,
+            bgcolor=colores["cyan_bg"],
+            border_radius=15,
+            margin=10
+        )
+        
+        # Historial de transferencias
+        lista_trans = ft.ListView(spacing=10, padding=10, expand=True)
+        
+        if not transferencias:
+            lista_trans.controls.append(
+                ft.Container(
+                    content=ft.Text("No hay transferencias registradas.", italic=True, color=colores["texto_secundario"]),
+                    padding=40,
+                    alignment=ft.alignment.center
+                )
+            )
+        else:
+            for trans in transferencias:
+                id_t, origen, destino, monto, fecha, desc = trans
+                lista_trans.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon("swap_horiz", color=colores["cyan"]),
+                            ft.Column([
+                                ft.Text(f"{origen} → {destino}", weight=ft.FontWeight.BOLD, size=14, color=colores["texto"]),
+                                ft.Text(fecha, size=12, color=colores["texto_secundario"]),
+                            ], expand=True, spacing=2),
+                            ft.Text(f"${monto:,.0f}", weight=ft.FontWeight.BOLD, color=colores["cyan"], size=16)
+                        ]),
+                        padding=12,
+                        bgcolor=colores["tarjeta"],
+                        border_radius=10,
+                        border=ft.border.all(1, colores["borde"])
+                    )
+                )
+        
+        return ft.Column([
+            header,
+            ft.Container(
+                content=ft.Text("📜 Historial de Transferencias", size=16, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                padding=ft.padding.only(left=15, top=10)
+            ),
+            lista_trans
+        ], spacing=0, expand=True)
+    
+    # Actualizar función de cambio de vista
+    def cambiar_vista(e):
+        nonlocal vista_actual
+        vistas = ["inicio", "suscripciones", "prestamos", "creditos", "ahorros", "bancos", "balance", "presupuestos", "transferencias", "configuracion"]
+        vista_actual = vistas[e.control.selected_index]
+        actualizar_vista()
+    
+    def actualizar_vista():
+        """Actualiza la vista actual"""
+        nonlocal vista_actual
+        
+        actualizar_balance()
+        contenedor_principal.controls.clear()
+        
+        if vista_actual == "inicio":
+            contenedor_principal.controls.append(crear_vista_inicio())
+        elif vista_actual == "suscripciones":
+            contenedor_principal.controls.append(crear_vista_suscripciones())
+        elif vista_actual == "prestamos":
+            contenedor_principal.controls.append(crear_vista_prestamos())
+        elif vista_actual == "creditos":
+            contenedor_principal.controls.append(crear_vista_creditos())
+        elif vista_actual == "ahorros":
+            contenedor_principal.controls.append(crear_vista_ahorros())
+        elif vista_actual == "bancos":
+            contenedor_principal.controls.append(crear_vista_bancos())
+        elif vista_actual == "balance":
+            contenedor_principal.controls.append(crear_vista_balance_mensual())
+        elif vista_actual == "presupuestos":
+            contenedor_principal.controls.append(crear_vista_presupuestos())
+        elif vista_actual == "transferencias":
+            contenedor_principal.controls.append(crear_vista_transferencias())
+        elif vista_actual == "configuracion":
+            contenedor_principal.controls.append(crear_vista_configuracion())
+        
+        page.update()
+
+    # Barra superior con botón de configuración
     page.appbar = ft.AppBar(
         title=ft.Text("💰 Mis Finanzas", color="white", size=20),
         center_title=True,
-        bgcolor="blue700",
-        elevation=2
+        bgcolor=colores["appbar"],
+        elevation=2,
+        actions=[
+            ft.IconButton(
+                icon="settings",
+                icon_color="white",
+                tooltip="Configuración",
+                on_click=lambda e: ir_a_configuracion()
+            )
+        ]
     )
+    
+    def ir_a_configuracion():
+        nonlocal vista_actual
+        vista_actual = "configuracion"
+        page.navigation_bar.selected_index = None
+        actualizar_vista()
 
-    # Barra de navegación inferior
+    # Barra de navegación inferior compacta (solo iconos para móvil)
     page.navigation_bar = ft.NavigationBar(
         destinations=[
-            ft.NavigationBarDestination(icon="home"),
-            ft.NavigationBarDestination(icon="subscriptions"),
-            ft.NavigationBarDestination(icon="account_balance"),
-            ft.NavigationBarDestination(icon="credit_card"),
-            ft.NavigationBarDestination(icon="savings"),
-            ft.NavigationBarDestination(icon="account_balance_wallet"),
-            ft.NavigationBarDestination(icon="bar_chart"),
+            ft.NavigationBarDestination(icon="home", label=""),
+            ft.NavigationBarDestination(icon="subscriptions", label=""),
+            ft.NavigationBarDestination(icon="account_balance", label=""),
+            ft.NavigationBarDestination(icon="credit_card", label=""),
+            ft.NavigationBarDestination(icon="savings", label=""),
+            ft.NavigationBarDestination(icon="account_balance_wallet", label=""),
+            ft.NavigationBarDestination(icon="bar_chart", label=""),
+            ft.NavigationBarDestination(icon="pie_chart", label=""),
+            ft.NavigationBarDestination(icon="swap_horiz", label=""),
         ],
         on_change=cambiar_vista,
-        selected_index=0
+        selected_index=0,
+        label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_HIDE,
+        height=56
     )
 
     # Botón Flotante
     page.floating_action_button = ft.FloatingActionButton(
         icon="add",
-        bgcolor="blue700",
+        bgcolor=colores["appbar"],
         on_click=abrir_agregar
     )
 
@@ -2499,14 +4197,48 @@ def main(page: ft.Page):
     page.overlay.append(bottom_sheet_monto_ahorro)
     page.overlay.append(bottom_sheet_banco)
     page.overlay.append(bottom_sheet_monto_banco)
+    page.overlay.append(dialogo_confirmacion)
     
-    # Agregar contenedor principal
-    page.add(contenedor_principal)
-
-    # Carga inicial
-    actualizar_vista()
+    # =====================================================
+    # PANTALLA DE LOGIN (PIN)
+    # =====================================================
+    
+    contenedor_login.content = ft.Container(
+        content=ft.Column([
+            ft.Container(height=80),
+            ft.Icon("lock", size=80, color="blue700"),
+            ft.Container(height=20),
+            txt_pin_titulo,
+            ft.Text("Ingresa 4 dígitos" if not db.tiene_pin() else "", size=14, color="grey600"),
+            ft.Container(height=30),
+            ft.Row(pin_inputs, alignment=ft.MainAxisAlignment.CENTER, spacing=10),
+            ft.Container(height=10),
+            txt_pin_mensaje,
+            ft.Container(height=30),
+            btn_saltar_pin,
+        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+        padding=30,
+        expand=True,
+        bgcolor=colores["fondo"]
+    )
+    
+    # Configurar título según si hay PIN
+    if db.tiene_pin():
+        txt_pin_titulo.value = "Ingresa tu PIN"
+    else:
+        txt_pin_titulo.value = "Crea tu PIN de seguridad"
+    
+    # Agregar contenedor de la app
+    contenedor_app.content = contenedor_principal
+    
+    # Agregar todo a la página
+    page.add(contenedor_login)
+    page.add(contenedor_onboarding)
+    page.add(contenedor_app)
+    
+    # Focus en el primer campo de PIN
+    pin_inputs[0].focus()
+    page.update()
 
 # Ejecutar la app
-# Para APK móvil, usar view=ft.AppView.FLET_APP
-# Para web, usar view=ft.AppView.WEB_BROWSER
 ft.app(target=main, view=ft.AppView.FLET_APP)
