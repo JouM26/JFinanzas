@@ -1,13 +1,20 @@
 import flet as ft
 import sqlite3
 import datetime
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
 import os
 import pathlib
 import platform
 import hashlib
 import json
+
+# Importar openpyxl solo si está disponible (no funciona en Android)
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    EXCEL_DISPONIBLE = True
+except ImportError:
+    EXCEL_DISPONIBLE = False
+    print("openpyxl no disponible - exportación Excel desactivada")
 
 # --- Lógica de Base de Datos (SQLite) ---
 class Database:
@@ -935,16 +942,31 @@ def get_persistent_db_path():
         elif sistema == 'darwin':
             # macOS: usar Application Support
             app_data_dir = pathlib.Path.home() / "Library" / "Application Support" / "JFinanzas"
+        elif sistema == 'linux':
+            # Verificar si es Android (Flet en Android reporta como Linux)
+            # En Android, usar el directorio de datos de la app
+            home = pathlib.Path.home()
+            if 'data' in str(home) and 'app' in str(home).lower():
+                # Es Android - usar directorio actual
+                app_data_dir = pathlib.Path(".") / "data"
+            else:
+                # Linux normal
+                app_data_dir = home / ".jfinanzas"
         else:
-            # Linux/Android/iOS: usar carpeta oculta en home
-            # En Android con Flet, esto se mapea al almacenamiento interno de la app
+            # Otros sistemas (iOS, etc)
             app_data_dir = pathlib.Path.home() / ".jfinanzas"
         
         app_data_dir.mkdir(parents=True, exist_ok=True)
         return str(app_data_dir / "finanzas.db")
     except Exception as e:
         print(f"Error obteniendo ruta persistente: {e}")
-        return "finanzas.db"
+        # Fallback: usar directorio actual
+        try:
+            data_dir = pathlib.Path("data")
+            data_dir.mkdir(exist_ok=True)
+            return str(data_dir / "finanzas.db")
+        except:
+            return "finanzas.db"
 
 
 # --- Interfaz Gráfica (Flet) ---
@@ -956,16 +978,22 @@ def main(page: ft.Page):
     
     # Configuración óptima para móvil y PC
     try:
-        if not page.web:
+        if hasattr(page, 'web') and not page.web:
             page.window_width = 400
             page.window_height = 800
     except:
         pass
     
-    # Usar almacenamiento persistente
-    db_path = get_persistent_db_path()
-    print(f"Base de datos en: {db_path}")
-    db = Database(db_path)
+    # Usar almacenamiento persistente con manejo de errores
+    try:
+        db_path = get_persistent_db_path()
+        print(f"Base de datos en: {db_path}")
+        db = Database(db_path)
+    except Exception as e:
+        # Si falla, mostrar error en pantalla
+        page.add(ft.Text(f"Error al inicializar: {e}", color="red", size=16))
+        page.update()
+        return
     
     # Aplicar tema guardado
     tema_guardado = db.obtener_tema()
@@ -2263,6 +2291,10 @@ def main(page: ft.Page):
     
     def exportar_movimientos_a_excel(mes, anio):
         """Exporta los movimientos mensuales a un archivo Excel"""
+        # Verificar si openpyxl está disponible
+        if not EXCEL_DISPONIBLE:
+            return False, "Exportación Excel no disponible en este dispositivo"
+        
         try:
             # Obtener datos
             movimientos = db.obtener_movimientos_mensuales(mes, anio)
@@ -4237,8 +4269,12 @@ def main(page: ft.Page):
     page.add(contenedor_app)
     
     # Focus en el primer campo de PIN
-    pin_inputs[0].focus()
+    try:
+        pin_inputs[0].focus()
+    except:
+        pass
     page.update()
 
 # Ejecutar la app
-ft.app(target=main, view=ft.AppView.FLET_APP)
+if __name__ == "__main__":
+    ft.app(target=main)
