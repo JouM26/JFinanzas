@@ -2,96 +2,54 @@ import flet as ft
 import datetime
 import os
 
-# Importar módulos separados con manejo de errores
-try:
-    from database import Database
-    from utils import (
-        get_persistent_db_path,
-        obtener_colores,
-        exportar_movimientos_a_excel,
-        EXCEL_DISPONIBLE,
-        CATEGORIAS,
-        COLORES_CATEGORIAS,
-        MESES_NOMBRES,
-        MESES_CORTOS,
-        ONBOARDING_PAGES
-    )
-except Exception as import_error:
-    print(f"Error importando módulos: {import_error}")
-    raise
+# Importar módulos locales
+from database import Database
+from utils import (
+    get_persistent_db_path,
+    obtener_colores,
+    EXCEL_DISPONIBLE,
+    CATEGORIAS,
+    COLORES_CATEGORIAS,
+    MESES_NOMBRES,
+    MESES_CORTOS,
+    ONBOARDING_PAGES
+)
+
+# Importar exportar_movimientos_a_excel solo si está disponible
+if EXCEL_DISPONIBLE:
+    from utils import exportar_movimientos_a_excel
+else:
+    def exportar_movimientos_a_excel(*args, **kwargs):
+        return False, "Excel no disponible"
 
 
 # --- Interfaz Gráfica (Flet) ---
 def main(page: ft.Page):
-    # Configuración básica inmediata
-    page.title = "💰 Mis Finanzas"
+    # Configuración básica
+    page.title = "Mis Finanzas"
     page.padding = 0
+    page.theme_mode = ft.ThemeMode.LIGHT
     
-    # Mostrar pantalla de carga inmediatamente
-    loading_text = ft.Text("Cargando...", size=20, color="blue")
-    loading_container = ft.Container(
-        content=ft.Column([
-            ft.ProgressRing(),
-            loading_text
-        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=20),
-        alignment=ft.alignment.center,
-        expand=True
-    )
-    page.add(loading_container)
-    page.update()
-    
-    # Variables para la base de datos
+    # Inicializar base de datos
     db = None
-    
     try:
-        loading_text.value = "Conectando base de datos..."
-        page.update()
-        
-        # Obtener ruta de BD con fallback simple
+        db_path = "finanzas.db"
         try:
             db_path = get_persistent_db_path()
         except:
-            db_path = "finanzas.db"
-        
+            pass
         db = Database(db_path)
-        
-        loading_text.value = "Aplicando tema..."
-        page.update()
         
         # Aplicar tema guardado
         try:
             tema_guardado = db.obtener_tema()
-            page.theme_mode = ft.ThemeMode.DARK if tema_guardado == "dark" else ft.ThemeMode.LIGHT
+            if tema_guardado == "dark":
+                page.theme_mode = ft.ThemeMode.DARK
         except:
-            page.theme_mode = ft.ThemeMode.LIGHT
-        
-        # Limpiar pantalla de carga
-        page.controls.clear()
-        page.update()
-        
+            pass
+            
     except Exception as e:
-        page.controls.clear()
-        error_text = ft.Text(
-            f"Error al iniciar: {str(e)}", 
-            color="red", 
-            size=14, 
-            selectable=True,
-            text_align=ft.TextAlign.CENTER
-        )
-        retry_btn = ft.ElevatedButton(
-            "Reintentar",
-            on_click=lambda _: page.window_close() if hasattr(page, 'window_close') else None
-        )
-        page.add(ft.Container(
-            content=ft.Column([
-                ft.Icon("error", size=50, color="red"),
-                error_text,
-                retry_btn
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=20),
-            alignment=ft.alignment.center,
-            expand=True,
-            padding=20
-        ))
+        page.add(ft.Text(f"Error: {e}", color="red"))
         page.update()
         return
     # Colores según tema - usando la función de utils.py
@@ -3089,7 +3047,7 @@ def main(page: ft.Page):
             nonlocal vista_actual
             vista_actual = seccion
             bottom_sheet_mas.open = False
-            page.navigation_bar.selected_index = None
+            page.update()
             actualizar_vista()
         
         opciones_mas = [
@@ -3143,15 +3101,12 @@ def main(page: ft.Page):
     
     def cerrar_menu_mas():
         bottom_sheet_mas.open = False
-        # Restaurar selección al inicio
-        page.navigation_bar.selected_index = 0
         page.update()
     
     # Bottom sheet para menú "Más"
     bottom_sheet_mas = ft.BottomSheet(
-        content=ft.Container(),
+        content=ft.Container(height=100),
         open=False,
-        on_dismiss=lambda e: setattr(page.navigation_bar, 'selected_index', 0) or page.update()
     )
     
     def actualizar_vista():
@@ -3203,7 +3158,6 @@ def main(page: ft.Page):
     def ir_a_configuracion():
         nonlocal vista_actual
         vista_actual = "configuracion"
-        page.navigation_bar.selected_index = None
         actualizar_vista()
 
     # Barra de navegación inferior simplificada
@@ -3238,9 +3192,7 @@ def main(page: ft.Page):
         on_change=cambiar_vista,
         selected_index=0,
         bgcolor=colores["tarjeta"],
-        indicator_color=colores["azul"] + "20" if colores["azul"].startswith("#") else "blue50",
         height=65,
-        elevation=8,
     )
 
     # Botón Flotante
@@ -3287,24 +3239,25 @@ def main(page: ft.Page):
     )
     
     # Configurar título según si hay PIN
-    if db.tiene_pin():
+    try:
+        if db.tiene_pin():
+            txt_pin_titulo.value = "Ingresa tu PIN"
+        else:
+            txt_pin_titulo.value = "Crea tu PIN de seguridad"
+    except:
         txt_pin_titulo.value = "Ingresa tu PIN"
-    else:
-        txt_pin_titulo.value = "Crea tu PIN de seguridad"
     
     # Agregar contenedor de la app
     contenedor_app.content = contenedor_principal
     
-    # Agregar todo a la página
-    page.add(contenedor_login)
-    page.add(contenedor_onboarding)
-    page.add(contenedor_app)
+    # Usar un Stack para manejar las vistas superpuestas
+    main_stack = ft.Stack([
+        contenedor_app,
+        contenedor_onboarding,
+        contenedor_login,
+    ], expand=True)
     
-    # Focus en el primer campo de PIN
-    try:
-        pin_inputs[0].focus()
-    except:
-        pass
+    page.add(main_stack)
     page.update()
 
 # Ejecutar la app

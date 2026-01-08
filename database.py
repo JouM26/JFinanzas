@@ -8,8 +8,15 @@ import json
 class Database:
     def __init__(self, db_path="finanzas.db"):
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.create_table()
+        try:
+            self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10)
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.create_table()
+        except Exception as e:
+            print(f"Error conectando a la base de datos: {e}")
+            # Intentar con base de datos en memoria como fallback
+            self.conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self.create_table()
 
     def create_table(self):
         cursor = self.conn.cursor()
