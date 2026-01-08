@@ -3065,9 +3065,94 @@ def main(page: ft.Page):
     # Actualizar función de cambio de vista
     def cambiar_vista(e):
         nonlocal vista_actual
-        vistas = ["inicio", "suscripciones", "prestamos", "creditos", "ahorros", "bancos", "balance", "presupuestos", "transferencias", "configuracion"]
-        vista_actual = vistas[e.control.selected_index]
-        actualizar_vista()
+        idx = e.control.selected_index
+        # Nueva estructura: Inicio, Movimientos, Reportes, Ahorros, Más
+        if idx == 0:
+            vista_actual = "inicio"
+            actualizar_vista()
+        elif idx == 1:
+            vista_actual = "balance"
+            actualizar_vista()
+        elif idx == 2:
+            vista_actual = "presupuestos"
+            actualizar_vista()
+        elif idx == 3:
+            vista_actual = "ahorros"
+            actualizar_vista()
+        elif idx == 4:
+            # Abrir menú "Más"
+            mostrar_menu_mas()
+    
+    def mostrar_menu_mas():
+        """Muestra el menú con opciones adicionales"""
+        def ir_a_seccion(seccion):
+            nonlocal vista_actual
+            vista_actual = seccion
+            bottom_sheet_mas.open = False
+            page.navigation_bar.selected_index = None
+            actualizar_vista()
+        
+        opciones_mas = [
+            {"icono": "subscriptions", "titulo": "Suscripciones", "subtitulo": "Netflix, Spotify, etc.", "seccion": "suscripciones", "color": colores["naranja"]},
+            {"icono": "account_balance", "titulo": "Préstamos", "subtitulo": "Deudas bancarias", "seccion": "prestamos", "color": colores["purple"]},
+            {"icono": "credit_card", "titulo": "Créditos", "subtitulo": "Compras a meses", "seccion": "creditos", "color": colores["indigo"]},
+            {"icono": "account_balance_wallet", "titulo": "Cuentas Bancarias", "subtitulo": "Administra tus cuentas", "seccion": "bancos", "color": colores["cyan"]},
+            {"icono": "swap_horiz", "titulo": "Transferencias", "subtitulo": "Entre cuentas", "seccion": "transferencias", "color": colores["teal"]},
+        ]
+        
+        lista_opciones = []
+        for op in opciones_mas:
+            lista_opciones.append(
+                ft.ListTile(
+                    leading=ft.Container(
+                        content=ft.Icon(op["icono"], color="white", size=24),
+                        width=45,
+                        height=45,
+                        border_radius=12,
+                        bgcolor=op["color"],
+                        alignment=ft.alignment.center
+                    ),
+                    title=ft.Text(op["titulo"], weight=ft.FontWeight.W_500, color=colores["texto"]),
+                    subtitle=ft.Text(op["subtitulo"], size=12, color=colores["texto_secundario"]),
+                    on_click=lambda e, s=op["seccion"]: ir_a_seccion(s),
+                )
+            )
+            lista_opciones.append(ft.Divider(height=1, color=colores["borde"]))
+        
+        bottom_sheet_mas.content = ft.Container(
+            content=ft.Column([
+                ft.Container(
+                    content=ft.Row([
+                        ft.Text("Más opciones", size=18, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                        ft.IconButton(
+                            icon="close",
+                            icon_color=colores["texto_secundario"],
+                            on_click=lambda e: cerrar_menu_mas()
+                        )
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    padding=ft.padding.only(left=20, right=10, top=10)
+                ),
+                ft.Divider(height=1, color=colores["borde"]),
+                ft.Column(lista_opciones, spacing=0),
+            ], spacing=0, tight=True),
+            bgcolor=colores["tarjeta"],
+            border_radius=ft.border_radius.only(top_left=20, top_right=20),
+        )
+        bottom_sheet_mas.open = True
+        page.update()
+    
+    def cerrar_menu_mas():
+        bottom_sheet_mas.open = False
+        # Restaurar selección al inicio
+        page.navigation_bar.selected_index = 0
+        page.update()
+    
+    # Bottom sheet para menú "Más"
+    bottom_sheet_mas = ft.BottomSheet(
+        content=ft.Container(),
+        open=False,
+        on_dismiss=lambda e: setattr(page.navigation_bar, 'selected_index', 0) or page.update()
+    )
     
     def actualizar_vista():
         """Actualiza la vista actual"""
@@ -3121,23 +3206,41 @@ def main(page: ft.Page):
         page.navigation_bar.selected_index = None
         actualizar_vista()
 
-    # Barra de navegación inferior compacta (solo iconos para móvil)
+    # Barra de navegación inferior simplificada
     page.navigation_bar = ft.NavigationBar(
         destinations=[
-            ft.NavigationBarDestination(icon="home", label=""),
-            ft.NavigationBarDestination(icon="subscriptions", label=""),
-            ft.NavigationBarDestination(icon="account_balance", label=""),
-            ft.NavigationBarDestination(icon="credit_card", label=""),
-            ft.NavigationBarDestination(icon="savings", label=""),
-            ft.NavigationBarDestination(icon="account_balance_wallet", label=""),
-            ft.NavigationBarDestination(icon="bar_chart", label=""),
-            ft.NavigationBarDestination(icon="pie_chart", label=""),
-            ft.NavigationBarDestination(icon="swap_horiz", label=""),
+            ft.NavigationBarDestination(
+                icon="home_outlined",
+                selected_icon="home",
+                label="Inicio"
+            ),
+            ft.NavigationBarDestination(
+                icon="receipt_long_outlined",
+                selected_icon="receipt_long",
+                label="Balance"
+            ),
+            ft.NavigationBarDestination(
+                icon="pie_chart_outline",
+                selected_icon="pie_chart",
+                label="Gastos"
+            ),
+            ft.NavigationBarDestination(
+                icon="savings_outlined",
+                selected_icon="savings",
+                label="Ahorros"
+            ),
+            ft.NavigationBarDestination(
+                icon="more_horiz",
+                selected_icon="more_horiz",
+                label="Más"
+            ),
         ],
         on_change=cambiar_vista,
         selected_index=0,
-        label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_HIDE,
-        height=56
+        bgcolor=colores["tarjeta"],
+        indicator_color=colores["azul"] + "20" if colores["azul"].startswith("#") else "blue50",
+        height=65,
+        elevation=8,
     )
 
     # Botón Flotante
@@ -3157,6 +3260,7 @@ def main(page: ft.Page):
     page.overlay.append(bottom_sheet_monto_ahorro)
     page.overlay.append(bottom_sheet_banco)
     page.overlay.append(bottom_sheet_monto_banco)
+    page.overlay.append(bottom_sheet_mas)
     page.overlay.append(dialogo_confirmacion)
     
     # =====================================================
