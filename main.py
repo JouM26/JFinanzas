@@ -2,57 +2,68 @@ import flet as ft
 import datetime
 import os
 
-# Importar módulos separados
-from database import Database
-from utils import (
-    get_persistent_db_path,
-    obtener_colores,
-    exportar_movimientos_a_excel,
-    EXCEL_DISPONIBLE,
-    CATEGORIAS,
-    COLORES_CATEGORIAS,
-    MESES_NOMBRES,
-    MESES_CORTOS,
-    ONBOARDING_PAGES
-)
+# Importar módulos separados con manejo de errores
+try:
+    from database import Database
+    from utils import (
+        get_persistent_db_path,
+        obtener_colores,
+        exportar_movimientos_a_excel,
+        EXCEL_DISPONIBLE,
+        CATEGORIAS,
+        COLORES_CATEGORIAS,
+        MESES_NOMBRES,
+        MESES_CORTOS,
+        ONBOARDING_PAGES
+    )
+except Exception as import_error:
+    print(f"Error importando módulos: {import_error}")
+    raise
 
 
 # --- Interfaz Gráfica (Flet) ---
 def main(page: ft.Page):
+    # Configuración básica inmediata
+    page.title = "💰 Mis Finanzas"
+    page.padding = 0
+    
     # Mostrar pantalla de carga inmediatamente
     loading_text = ft.Text("Cargando...", size=20, color="blue")
-    page.add(ft.Container(
+    loading_container = ft.Container(
         content=ft.Column([
             ft.ProgressRing(),
             loading_text
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=20),
         alignment=ft.alignment.center,
         expand=True
-    ))
+    )
+    page.add(loading_container)
     page.update()
     
+    # Variables para la base de datos
+    db = None
+    
     try:
-        # Configuración inicial para móvil
-        page.title = "💰 Mis Finanzas"
-        page.padding = 0
-        page.scroll = ft.ScrollMode.AUTO
-        
-        loading_text.value = "Configurando..."
-        page.update()
-        
-        # Usar almacenamiento persistente con manejo de errores
         loading_text.value = "Conectando base de datos..."
         page.update()
         
-        db_path = get_persistent_db_path()
+        # Obtener ruta de BD con fallback simple
+        try:
+            db_path = get_persistent_db_path()
+        except:
+            db_path = "finanzas.db"
+        
         db = Database(db_path)
         
         loading_text.value = "Aplicando tema..."
         page.update()
         
         # Aplicar tema guardado
-        tema_guardado = db.obtener_tema()
-        page.theme_mode = ft.ThemeMode.DARK if tema_guardado == "dark" else ft.ThemeMode.LIGHT
+        try:
+            tema_guardado = db.obtener_tema()
+            page.theme_mode = ft.ThemeMode.DARK if tema_guardado == "dark" else ft.ThemeMode.LIGHT
+        except:
+            page.theme_mode = ft.ThemeMode.LIGHT
         
         # Limpiar pantalla de carga
         page.controls.clear()
@@ -60,7 +71,27 @@ def main(page: ft.Page):
         
     except Exception as e:
         page.controls.clear()
-        page.add(ft.Text(f"Error inicial: {e}", color="red", size=16, selectable=True))
+        error_text = ft.Text(
+            f"Error al iniciar: {str(e)}", 
+            color="red", 
+            size=14, 
+            selectable=True,
+            text_align=ft.TextAlign.CENTER
+        )
+        retry_btn = ft.ElevatedButton(
+            "Reintentar",
+            on_click=lambda _: page.window_close() if hasattr(page, 'window_close') else None
+        )
+        page.add(ft.Container(
+            content=ft.Column([
+                ft.Icon("error", size=50, color="red"),
+                error_text,
+                retry_btn
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=20),
+            alignment=ft.alignment.center,
+            expand=True,
+            padding=20
+        ))
         page.update()
         return
     # Colores según tema - usando la función de utils.py

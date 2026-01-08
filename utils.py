@@ -2,19 +2,35 @@
 import os
 import pathlib
 import platform
-import flet as ft
 
 # Importar openpyxl solo si está disponible (no funciona en Android)
+EXCEL_DISPONIBLE = False
+Workbook = None
+Font = None
+PatternFill = None
+Alignment = None
+
 try:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     EXCEL_DISPONIBLE = True
-except ImportError:
-    EXCEL_DISPONIBLE = False
-    Workbook = None
-    Font = None
-    PatternFill = None
-    Alignment = None
+except:
+    pass
+
+
+def es_android():
+    """Detecta si estamos en Android"""
+    try:
+        # En Android, el home suele contener /data/data/ o /data/user/
+        home = str(pathlib.Path.home())
+        if '/data/data/' in home or '/data/user/' in home:
+            return True
+        # También verificar variable de entorno
+        if os.environ.get('ANDROID_ROOT') or os.environ.get('ANDROID_DATA'):
+            return True
+        return False
+    except:
+        return False
 
 
 def get_persistent_db_path():
@@ -23,6 +39,10 @@ def get_persistent_db_path():
     Esta ruta NO se elimina cuando se actualiza la app.
     """
     try:
+        # En Android, usar directorio actual
+        if es_android():
+            return "finanzas.db"
+        
         sistema = platform.system().lower()
         
         if sistema == 'windows':
@@ -30,11 +50,7 @@ def get_persistent_db_path():
         elif sistema == 'darwin':
             app_data_dir = pathlib.Path.home() / "Library" / "Application Support" / "JFinanzas"
         elif sistema == 'linux':
-            home = pathlib.Path.home()
-            if 'data' in str(home) and 'app' in str(home).lower():
-                app_data_dir = pathlib.Path(".") / "data"
-            else:
-                app_data_dir = home / ".jfinanzas"
+            app_data_dir = pathlib.Path.home() / ".jfinanzas"
         else:
             app_data_dir = pathlib.Path.home() / ".jfinanzas"
         
@@ -42,12 +58,7 @@ def get_persistent_db_path():
         return str(app_data_dir / "finanzas.db")
     except Exception as e:
         print(f"Error obteniendo ruta persistente: {e}")
-        try:
-            data_dir = pathlib.Path("data")
-            data_dir.mkdir(exist_ok=True)
-            return str(data_dir / "finanzas.db")
-        except:
-            return "finanzas.db"
+        return "finanzas.db"
 
 
 def obtener_colores(es_oscuro):
