@@ -49,9 +49,9 @@ def crear_pdf_respaldo(datos_json):
             contenido.extend([pdf_texto(linea[:115]), b"Tj", b"T*"])
         contenido.append(b"ET")
         stream = b"\n".join(contenido)
-        id_stream = len(objetos)
+        id_stream = len(objetos) + 1
         objetos.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
-        id_pagina = len(objetos)
+        id_pagina = len(objetos) + 1
         objetos.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents {id_stream} 0 R >>".encode())
         ids_paginas.append(id_pagina)
     objetos[0] = b"<< /Type /Catalog /Pages 2 0 R >>"

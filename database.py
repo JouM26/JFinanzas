@@ -212,6 +212,17 @@ class Database:
     
     def tiene_pin(self):
         return self.obtener_config("pin_hash") is not None
+
+    def borrar_pin(self):
+        """Elimina el PIN al validar un respaldo durante el proceso de recuperación."""
+        try:
+            self.conn.execute("DELETE FROM configuracion WHERE clave IN ('pin_hash', 'pin_intentos', 'pin_bloqueado_hasta')")
+            self.conn.commit()
+            return True
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error al borrar PIN: {e}")
+            return False
     
     def es_primera_vez(self):
         return self.obtener_config("onboarding_completado") != "1"

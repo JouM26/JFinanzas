@@ -26,10 +26,35 @@ else:
 
 # --- Interfaz Gráfica (Flet) ---
 def main(page: ft.Page):
+    def normalizar_texto_importe(valor):
+        """Quita separadores visuales antes de convertir un importe a número."""
+        return (valor or "").replace(",", "").replace(" ", "").strip()
+
+    def formatear_texto_importe(valor):
+        valor = (valor or "").replace(",", "").replace(" ", "")
+        negativo = valor.startswith("-")
+        if negativo:
+            valor = valor[1:]
+        digitos, separador, decimales = valor.partition(".")
+        digitos = "".join(caracter for caracter in digitos if caracter.isdigit())
+        decimales = "".join(caracter for caracter in decimales if caracter.isdigit())
+        if not digitos and not decimales:
+            return "-" if negativo else ""
+        entero = f"{int(digitos):,}" if digitos else "0"
+        resultado = ("-" if negativo else "") + entero
+        if separador:
+            resultado += "." + decimales
+        return resultado
+
+    def formatear_campo_importe(e):
+        # El valor se actualiza sin page.update para no interrumpir la escritura.
+        e.control.value = formatear_texto_importe(e.control.value)
+
     # Configuración básica
     page.title = "Mis Finanzas"
     page.padding = 0
     page.theme_mode = ft.ThemeMode.LIGHT
+    page.bgcolor = "white"
     
     # Inicializar base de datos
     db = None
@@ -59,6 +84,7 @@ def main(page: ft.Page):
         return obtener_colores(es_oscuro)
     
     colores = get_colores()
+    page.bgcolor = colores["fondo"]
     
     # Estado para navegación
     vista_actual = "inicio"
@@ -85,9 +111,40 @@ def main(page: ft.Page):
             password=True,
             on_change=lambda e, idx=i: manejar_pin_input(e, idx)
         ))
+
+    input_pin_actual_cambio = ft.TextField(
+        label="PIN actual", password=True, can_reveal_password=True,
+        keyboard_type=ft.KeyboardType.NUMBER, max_length=4, width=260,
+    )
+    input_pin_nuevo_cambio = ft.TextField(
+        label="PIN nuevo (4 dígitos)", password=True, can_reveal_password=True,
+        keyboard_type=ft.KeyboardType.NUMBER, max_length=4, width=260,
+    )
+
+    def confirmar_cambio_pin(e):
+        pin_actual = input_pin_actual_cambio.value or ""
+        pin_nuevo = input_pin_nuevo_cambio.value or ""
+        input_pin_actual_cambio.error_text = None
+        input_pin_nuevo_cambio.error_text = None
+        if len(pin_actual) != 4 or not pin_actual.isdigit():
+            input_pin_actual_cambio.error_text = "Ingresa tu PIN actual de 4 dígitos."
+        elif not db.verificar_pin(pin_actual):
+            input_pin_actual_cambio.error_text = "PIN actual incorrecto."
+        elif len(pin_nuevo) != 4 or not pin_nuevo.isdigit():
+            input_pin_nuevo_cambio.error_text = "El nuevo PIN debe tener 4 dígitos."
+        elif not db.guardar_pin(pin_nuevo):
+            input_pin_nuevo_cambio.error_text = "No se pudo guardar el nuevo PIN."
+        else:
+            bottom_sheet_cambiar_pin.open = False
+            page.show_snack_bar(ft.SnackBar(
+                content=ft.Text("✅ PIN cambiado correctamente."),
+                bgcolor=colores["verde"],
+            ))
+        page.update()
     
     txt_pin_mensaje = ft.Text("", color="red", size=14, text_align=ft.TextAlign.CENTER)
     txt_pin_titulo = ft.Text("Ingresa tu PIN", size=24, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER)
+    txt_pin_instruccion = ft.Text("Ingresa 4 dígitos", size=14, color=colores["texto_secundario"])
     
     def manejar_pin_input(e, idx):
         """Maneja la entrada de PIN y pasa al siguiente campo"""
@@ -152,6 +209,32 @@ def main(page: ft.Page):
         
         page.update()
 
+    def restaurar_desde_respaldo_pin(e: ft.FilePickerResultEvent):
+        """Restaura los datos de un respaldo JSON y permite crear un PIN nuevo."""
+        if not e.files:
+            return
+        try:
+            with open(e.files[0].path, "r", encoding="utf-8") as archivo:
+                respaldo = archivo.read()
+            if not db.importar_datos(respaldo):
+                raise ValueError("El archivo no es un respaldo válido de Mis Finanzas.")
+            if not db.borrar_pin():
+                raise ValueError("No se pudo reiniciar el PIN.")
+            db.completar_onboarding()
+            txt_pin_titulo.value = "Crea un nuevo PIN"
+            txt_pin_instruccion.value = "Respaldo restaurado. Ingresa un PIN nuevo de 4 dígitos."
+            txt_pin_mensaje.value = ""
+            btn_recuperar_pin.visible = False
+            btn_saltar_pin.visible = False
+            limpiar_pin()
+            page.show_snack_bar(ft.SnackBar(content=ft.Text("Datos restaurados. Ahora configura tu nuevo PIN."), bgcolor=colores["verde"]))
+            page.update()
+        except Exception as ex:
+            txt_pin_mensaje.value = f"No se pudo restaurar el respaldo: {ex}"
+            page.update()
+
+    picker_recuperar_pin = ft.FilePicker(on_result=restaurar_desde_respaldo_pin)
+
     def saltar_pin():
         """Permite saltar el PIN (solo si no hay PIN configurado)"""
         if not db.tiene_pin():
@@ -164,6 +247,16 @@ def main(page: ft.Page):
         "Continuar sin PIN",
         on_click=lambda e: saltar_pin(),
         visible=not db.tiene_pin() and not db.es_primera_vez()
+    )
+
+    btn_recuperar_pin = ft.TextButton(
+        "Restaurar respaldo o recuperar PIN",
+        on_click=lambda e: picker_recuperar_pin.pick_files(
+            allowed_extensions=["json"],
+            dialog_title="Selecciona tu respaldo JSON",
+            file_type=ft.FilePickerFileType.CUSTOM,
+        ),
+        visible=True,
     )
     
     # =====================================================
@@ -251,6 +344,8 @@ def main(page: ft.Page):
         contenedor_onboarding.content = crear_pagina_onboarding(0)
         contenedor_onboarding.visible = True
         contenedor_app.visible = False
+        page.navigation_bar.visible = False
+        page.floating_action_button.visible = False
         page.update()
     
     def siguiente_onboarding():
@@ -267,6 +362,8 @@ def main(page: ft.Page):
         db.completar_onboarding()
         contenedor_onboarding.visible = False
         contenedor_app.visible = True
+        page.navigation_bar.visible = True
+        page.floating_action_button.visible = True
         actualizar_vista()
         page.update()
     
@@ -1695,7 +1792,7 @@ def main(page: ft.Page):
         
         # Validar formato de número
         try:
-            monto = float(input_monto.value)
+            monto = float(normalizar_texto_importe(input_monto.value))
         except ValueError:
             input_monto.error_text = "Debe ser un número válido"
             page.update()
@@ -1767,7 +1864,7 @@ def main(page: ft.Page):
             return
         
         try:
-            monto = float(input_sub_monto.value)
+            monto = float(normalizar_texto_importe(input_sub_monto.value))
             dia = int(input_sub_dia.value)
         except ValueError:
             input_sub_monto.error_text = "Debe ser un número"
@@ -1809,8 +1906,8 @@ def main(page: ft.Page):
             return
         
         try:
-            monto_total = float(input_prest_monto_total.value)
-            cuota = float(input_prest_cuota.value)
+            monto_total = float(normalizar_texto_importe(input_prest_monto_total.value))
+            cuota = float(normalizar_texto_importe(input_prest_cuota.value))
             dia = int(input_prest_dia.value)
         except ValueError:
             input_prest_monto_total.error_text = "Debe ser un número"
@@ -1855,7 +1952,7 @@ def main(page: ft.Page):
             return
         
         try:
-            monto = float(input_credito_monto.value)
+            monto = float(normalizar_texto_importe(input_credito_monto.value))
             meses = int(input_credito_meses.value)
             tasa_interes = float(input_credito_interes.value) if input_credito_interes.value else 0
         except ValueError:
@@ -1897,7 +1994,7 @@ def main(page: ft.Page):
             return
         
         try:
-            meta = float(input_ahorro_meta.value)
+            meta = float(normalizar_texto_importe(input_ahorro_meta.value))
         except ValueError:
             input_ahorro_meta.error_text = "Debe ser un número"
             page.update()
@@ -1928,8 +2025,8 @@ def main(page: ft.Page):
             return
         
         try:
-            saldo = float(input_banco_saldo.value) if input_banco_saldo.value else 0
-            limite = float(input_banco_limite.value) if input_banco_limite.value else 0
+            saldo = float(normalizar_texto_importe(input_banco_saldo.value)) if input_banco_saldo.value else 0
+            limite = float(normalizar_texto_importe(input_banco_limite.value)) if input_banco_limite.value else 0
         except ValueError:
             input_banco_saldo.error_text = "Debe ser un número"
             page.update()
@@ -2025,7 +2122,7 @@ def main(page: ft.Page):
     input_sub_nombre = ft.TextField(
         label="Nombre",
         hint_text="Ej: Netflix, Spotify...",
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="orange700",
         focused_border_color="orange900"
@@ -2033,7 +2130,7 @@ def main(page: ft.Page):
     input_sub_monto = ft.TextField(
         label="Monto mensual",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="orange700",
         focused_border_color="orange900"
@@ -2041,7 +2138,7 @@ def main(page: ft.Page):
     input_sub_dia = ft.TextField(
         label="Día de cobro (1-31)",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="orange700",
         focused_border_color="orange900"
@@ -2051,7 +2148,7 @@ def main(page: ft.Page):
     input_prest_banco = ft.TextField(
         label="Banco",
         hint_text="Ej: Banco Nacional, BBVA...",
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="purple700",
         focused_border_color="purple900"
@@ -2059,7 +2156,7 @@ def main(page: ft.Page):
     input_prest_monto_total = ft.TextField(
         label="Monto total del préstamo",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="purple700",
         focused_border_color="purple900"
@@ -2067,7 +2164,7 @@ def main(page: ft.Page):
     input_prest_cuota = ft.TextField(
         label="Cuota mensual",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="purple700",
         focused_border_color="purple900"
@@ -2075,7 +2172,7 @@ def main(page: ft.Page):
     input_prest_dia = ft.TextField(
         label="Día de pago (1-31)",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="purple700",
         focused_border_color="purple900"
@@ -2085,7 +2182,7 @@ def main(page: ft.Page):
     input_pago_monto = ft.TextField(
         label="Monto del pago",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="purple700",
         focused_border_color="purple900"
@@ -2095,7 +2192,7 @@ def main(page: ft.Page):
     input_credito_desc = ft.TextField(
         label="Descripción de la compra",
         hint_text="Ej: TV, Laptop, Refrigerador...",
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="indigo700",
         focused_border_color="indigo900"
@@ -2103,7 +2200,7 @@ def main(page: ft.Page):
     input_credito_banco = ft.TextField(
         label="Banco/Tarjeta",
         hint_text="Ej: BBVA, Santander, Liverpool...",
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="indigo700",
         focused_border_color="indigo900"
@@ -2111,7 +2208,7 @@ def main(page: ft.Page):
     input_credito_monto = ft.TextField(
         label="Monto total",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="indigo700",
         focused_border_color="indigo900"
@@ -2119,7 +2216,7 @@ def main(page: ft.Page):
     input_credito_meses = ft.TextField(
         label="Plazo en meses",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="indigo700",
         focused_border_color="indigo900"
@@ -2129,7 +2226,7 @@ def main(page: ft.Page):
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text="Ej: 0, 2.5, 3.8",
         value="0",
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="indigo700",
         focused_border_color="indigo900"
@@ -2137,7 +2234,7 @@ def main(page: ft.Page):
     dropdown_credito_cuenta_pago = ft.Dropdown(
         label="Pagar desde",
         options=[],
-        color="black",
+        color=colores["texto"],
         border_color="indigo700",
     )
     
@@ -2145,7 +2242,7 @@ def main(page: ft.Page):
     input_ahorro_nombre = ft.TextField(
         label="Nombre del ahorro",
         hint_text="Ej: Vacaciones, Auto, Casa...",
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="teal700",
         focused_border_color="teal900"
@@ -2153,7 +2250,7 @@ def main(page: ft.Page):
     input_ahorro_meta = ft.TextField(
         label="Meta de ahorro",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="teal700",
         focused_border_color="teal900"
@@ -2163,7 +2260,7 @@ def main(page: ft.Page):
     input_monto_ahorro = ft.TextField(
         label="Monto",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="teal700",
         focused_border_color="teal900"
@@ -2173,7 +2270,7 @@ def main(page: ft.Page):
     input_banco_nombre = ft.TextField(
         label="Nombre del banco",
         hint_text="Ej: BBVA, Santander, Banorte...",
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="cyan900",
         focused_border_color="cyan900"
@@ -2187,14 +2284,14 @@ def main(page: ft.Page):
             ft.dropdown.Option("inversion", "Inversión"),
         ],
         value="debito",
-        color="black",
+        color=colores["texto"],
         border_color="cyan900"
     )
     input_banco_saldo = ft.TextField(
         label="Saldo inicial",
         keyboard_type=ft.KeyboardType.NUMBER,
         value="0",
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="cyan900",
         focused_border_color="cyan900"
@@ -2203,7 +2300,7 @@ def main(page: ft.Page):
         label="Límite de crédito (solo para tarjetas)",
         keyboard_type=ft.KeyboardType.NUMBER,
         value="0",
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="cyan900",
         focused_border_color="cyan900"
@@ -2213,11 +2310,31 @@ def main(page: ft.Page):
     input_monto_banco = ft.TextField(
         label="Monto",
         keyboard_type=ft.KeyboardType.NUMBER,
-        color="black",
+        color=colores["texto"],
         text_size=16,
         border_color="cyan900",
         focused_border_color="cyan900"
     )
+
+    # Separador de miles en todos los campos de importes de la aplicación.
+    campos_importe = [
+        input_monto, input_sub_monto, input_prest_monto_total, input_prest_cuota,
+        input_pago_monto, input_credito_monto, input_ahorro_meta, input_monto_ahorro,
+        input_banco_saldo, input_banco_limite, input_monto_banco,
+    ]
+    for campo_importe in campos_importe:
+        campo_importe.on_change = formatear_campo_importe
+        if campo_importe.value:
+            campo_importe.value = formatear_texto_importe(campo_importe.value)
+    campos_texto_app = [
+        input_desc, input_monto, input_busqueda, input_sub_nombre, input_sub_monto,
+        input_sub_dia, input_prest_banco, input_prest_monto_total, input_prest_cuota,
+        input_prest_dia, input_pago_monto, input_credito_desc, input_credito_banco,
+        input_credito_monto, input_credito_meses, input_credito_interes,
+        input_ahorro_nombre, input_ahorro_meta, input_monto_ahorro,
+        input_banco_nombre, input_banco_saldo, input_banco_limite, input_monto_banco,
+        input_pin_actual_cambio, input_pin_nuevo_cambio, *pin_inputs,
+    ]
 
     # Dialogo para agregar movimiento
     bottom_sheet_movimiento = ft.BottomSheet(
@@ -2337,6 +2454,22 @@ def main(page: ft.Page):
         is_scroll_controlled=True,
         use_safe_area=True,
     )
+
+    bottom_sheet_cambiar_pin = ft.BottomSheet(
+        ft.Container(
+            ft.Column([
+                ft.Text("🔐 Cambiar PIN de seguridad", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                input_pin_actual_cambio,
+                input_pin_nuevo_cambio,
+                ft.ElevatedButton("Confirmar cambio", on_click=confirmar_cambio_pin, width=float("inf")),
+            ], tight=True, spacing=15, scroll=ft.ScrollMode.AUTO),
+            padding=20,
+            bgcolor=colores["tarjeta"],
+            border_radius=ft.border_radius.only(top_left=20, top_right=20),
+        ),
+        is_scroll_controlled=True,
+        use_safe_area=True,
+    )
     
     # Variable para almacenar el ID del préstamo al registrar pago
     prestamo_id_pago = [None]
@@ -2377,7 +2510,7 @@ def main(page: ft.Page):
             return
         
         try:
-            monto = float(input_pago_monto.value)
+            monto = float(normalizar_texto_importe(input_pago_monto.value))
         except ValueError:
             input_pago_monto.error_text = "Debe ser un número"
             page.update()
@@ -2468,7 +2601,7 @@ def main(page: ft.Page):
             return
         
         try:
-            monto = float(input_monto_ahorro.value)
+            monto = float(normalizar_texto_importe(input_monto_ahorro.value))
         except ValueError:
             input_monto_ahorro.error_text = "Debe ser un número"
             page.update()
@@ -2568,7 +2701,7 @@ def main(page: ft.Page):
             return
         
         try:
-            monto = float(input_monto_banco.value)
+            monto = float(normalizar_texto_importe(input_monto_banco.value))
         except ValueError:
             input_monto_banco.error_text = "Debe ser un número"
             page.update()
@@ -2678,7 +2811,7 @@ def main(page: ft.Page):
         registro_editando[1] = id_mov
         
         input_desc.value = desc
-        input_monto.value = str(monto)
+        input_monto.value = formatear_texto_importe(monto)
         dropdown_tipo.value = tipo
         dropdown_cat.value = cat
         detalle = db.obtener_movimiento_edicion(id_mov)
@@ -2703,7 +2836,7 @@ def main(page: ft.Page):
         registro_editando[1] = id_sub
         
         input_sub_nombre.value = nombre
-        input_sub_monto.value = str(monto)
+        input_sub_monto.value = formatear_texto_importe(monto)
         input_sub_dia.value = str(dia_cobro)
         
         bottom_sheet_suscripcion.open = True
@@ -2717,8 +2850,8 @@ def main(page: ft.Page):
         registro_editando[1] = id_pres
         
         input_prest_banco.value = banco
-        input_prest_monto_total.value = str(monto_total)
-        input_prest_cuota.value = str(cuota_mensual)
+        input_prest_monto_total.value = formatear_texto_importe(monto_total)
+        input_prest_cuota.value = formatear_texto_importe(cuota_mensual)
         input_prest_dia.value = str(dia_pago)
         
         bottom_sheet_prestamo.open = True
@@ -2732,7 +2865,7 @@ def main(page: ft.Page):
         registro_editando[1] = id_aho
         
         input_ahorro_nombre.value = nombre
-        input_ahorro_meta.value = str(meta)
+        input_ahorro_meta.value = formatear_texto_importe(meta)
         
         bottom_sheet_ahorro.open = True
         page.update()
@@ -2751,19 +2884,25 @@ def main(page: ft.Page):
             nuevo_tema = "dark" if e.control.value else "light"
             db.guardar_tema(nuevo_tema)
             page.theme_mode = ft.ThemeMode.DARK if nuevo_tema == "dark" else ft.ThemeMode.LIGHT
+            colores_actuales = get_colores()
+            page.bgcolor = colores_actuales["fondo"]
+            page.appbar.bgcolor = colores_actuales["appbar"]
+            page.navigation_bar.bgcolor = colores_actuales["tarjeta"]
+            page.floating_action_button.bgcolor = colores_actuales["appbar"]
+            for campo in campos_texto_app:
+                campo.color = colores_actuales["texto"]
+                campo.bgcolor = colores_actuales["input_bg"]
+                campo.border_color = colores_actuales["input_border"]
             page.update()
             actualizar_vista()
         
         def cambiar_pin(e):
-            """Abre el diálogo para cambiar PIN"""
-            # Limpiar campos
-            for p in pin_inputs:
-                p.value = ""
-            txt_pin_titulo.value = "Crear nuevo PIN"
-            txt_pin_mensaje.value = ""
-            contenedor_login.visible = True
-            contenedor_app.visible = False
-            btn_saltar_pin.visible = True
+            """Solicita PIN actual y PIN nuevo sin sacar al usuario de la app."""
+            input_pin_actual_cambio.value = ""
+            input_pin_nuevo_cambio.value = ""
+            input_pin_actual_cambio.error_text = None
+            input_pin_nuevo_cambio.error_text = None
+            bottom_sheet_cambiar_pin.open = True
             page.update()
         
         def exportar_backup(e):
@@ -2920,7 +3059,7 @@ def main(page: ft.Page):
                             ft.Icon("backup", color=colores["verde"]),
                             ft.Column([
                                 ft.Text("Exportar Backup", weight=ft.FontWeight.BOLD, color=colores["texto"]),
-                                ft.Text("Guarda todos tus datos en JSON", size=12, color=colores["texto_secundario"]),
+                                ft.Text("Respaldo para reinstalar o recuperar tu PIN", size=12, color=colores["texto_secundario"]),
                             ], expand=True, spacing=2),
                             ft.IconButton(icon="download", on_click=exportar_backup, icon_color=colores["texto"])
                         ]),
@@ -3040,7 +3179,8 @@ def main(page: ft.Page):
                             width=120,
                             height=40,
                             text_size=14,
-                            data=cat
+                            data=cat,
+                            on_change=formatear_campo_importe,
                         ),
                         ft.ElevatedButton(
                             "Guardar",
@@ -3073,7 +3213,7 @@ def main(page: ft.Page):
         for control in e.control.parent.controls:
             if isinstance(control, ft.TextField) and control.data == categoria:
                 try:
-                    limite = float(control.value)
+                    limite = float(normalizar_texto_importe(control.value))
                     if limite > 0:
                         db.agregar_presupuesto(categoria, limite)
                         actualizar_vista()
@@ -3114,7 +3254,11 @@ def main(page: ft.Page):
         input_monto_trans = ft.TextField(
             label="Monto",
             keyboard_type=ft.KeyboardType.NUMBER,
-            width=120
+            width=120,
+            color=colores["texto"],
+            bgcolor=colores["input_bg"],
+            border_color=colores["input_border"],
+            on_change=formatear_campo_importe,
         )
         
         def realizar_transferencia_click(e):
@@ -3131,13 +3275,17 @@ def main(page: ft.Page):
                 return
             
             try:
-                monto = float(input_monto_trans.value)
+                monto = float(normalizar_texto_importe(input_monto_trans.value))
                 if monto <= 0:
                     raise ValueError()
-                
-                if db.realizar_transferencia(int(dropdown_origen.value), int(dropdown_destino.value), monto):
+                cuenta_origen_id = int(dropdown_origen.value)
+                cuenta_destino_id = int(dropdown_destino.value)
+                nombre_origen = next((c[1] for c in cuentas if c[0] == cuenta_origen_id), "origen")
+                nombre_destino = next((c[1] for c in cuentas if c[0] == cuenta_destino_id), "destino")
+
+                if db.realizar_transferencia(cuenta_origen_id, cuenta_destino_id, monto):
                     page.show_snack_bar(
-                        ft.SnackBar(content=ft.Text("✅ Transferencia realizada"), bgcolor=colores["verde"])
+                        ft.SnackBar(content=ft.Text(f"✅ ${monto:,.0f} transferidos: {nombre_origen} → {nombre_destino}"), bgcolor=colores["verde"])
                     )
                     dropdown_origen.value = None
                     dropdown_destino.value = None
@@ -3210,26 +3358,10 @@ def main(page: ft.Page):
             lista_trans
         ], spacing=0, expand=True)
     
-    # Actualizar función de cambio de vista
-    def cambiar_vista(e):
+    def navegar_a(seccion):
         nonlocal vista_actual
-        idx = e.control.selected_index
-        # Nueva estructura: Inicio, Movimientos, Reportes, Ahorros, Más
-        if idx == 0:
-            vista_actual = "inicio"
-            actualizar_vista()
-        elif idx == 1:
-            vista_actual = "balance"
-            actualizar_vista()
-        elif idx == 2:
-            vista_actual = "presupuestos"
-            actualizar_vista()
-        elif idx == 3:
-            vista_actual = "ahorros"
-            actualizar_vista()
-        elif idx == 4:
-            # Abrir menú "Más"
-            mostrar_menu_mas()
+        vista_actual = seccion
+        actualizar_vista()
     
     def mostrar_menu_mas():
         """Muestra el menú con opciones adicionales"""
@@ -3298,6 +3430,8 @@ def main(page: ft.Page):
         content=ft.Container(height=100),
         open=False,
     )
+
+    botones_navegacion = {}
     
     def actualizar_vista():
         """Actualiza la vista actual"""
@@ -3326,7 +3460,22 @@ def main(page: ft.Page):
             contenedor_principal.controls.append(crear_vista_transferencias())
         elif vista_actual == "configuracion":
             contenedor_principal.controls.append(crear_vista_configuracion())
-        
+
+        colores_actuales = get_colores()
+        page.appbar.bgcolor = colores_actuales["appbar"]
+        page.navigation_bar.bgcolor = colores_actuales["tarjeta"]
+        for seccion, boton in botones_navegacion.items():
+            seleccionado = vista_actual == seccion
+            boton.bgcolor = colores_actuales["azul_bg"] if seleccionado else "transparent"
+            boton.icon_color = colores_actuales["azul"] if seleccionado else colores_actuales["texto_secundario"]
+        page.floating_action_button.visible = (
+            app_desbloqueada[0]
+            and not contenedor_onboarding.visible
+            and vista_actual not in ("balance", "configuracion")
+        )
+        page.floating_action_button.bgcolor = colores_actuales["appbar"]
+        page.navigation_bar.visible = app_desbloqueada[0] and not contenedor_onboarding.visible
+
         page.update()
 
     # Barra superior con botón de configuración
@@ -3350,39 +3499,37 @@ def main(page: ft.Page):
         vista_actual = "configuracion"
         actualizar_vista()
 
-    # Barra de navegación inferior simplificada
-    page.navigation_bar = ft.NavigationBar(
-        destinations=[
-            ft.NavigationBarDestination(
-                icon="home_outlined",
-                selected_icon="home",
-                label="Inicio"
-            ),
-            ft.NavigationBarDestination(
-                icon="receipt_long_outlined",
-                selected_icon="receipt_long",
-                label="Balance"
-            ),
-            ft.NavigationBarDestination(
-                icon="pie_chart_outline",
-                selected_icon="pie_chart",
-                label="Gastos"
-            ),
-            ft.NavigationBarDestination(
-                icon="savings_outlined",
-                selected_icon="savings",
-                label="Ahorros"
-            ),
-            ft.NavigationBarDestination(
-                icon="more_horiz",
-                selected_icon="more_horiz",
-                label="Más"
-            ),
-        ],
-        on_change=cambiar_vista,
-        selected_index=0,
+    # Barra de navegación desplazable: solo iconos, sin botón de "Más".
+    opciones_navegacion = [
+        ("inicio", "home", "Inicio"),
+        ("balance", "receipt_long", "Balance"),
+        ("presupuestos", "pie_chart", "Presupuestos"),
+        ("ahorros", "savings", "Ahorros"),
+        ("suscripciones", "subscriptions", "Suscripciones"),
+        ("prestamos", "account_balance", "Préstamos"),
+        ("creditos", "credit_card", "Créditos"),
+        ("bancos", "account_balance_wallet", "Cuentas"),
+        ("transferencias", "swap_horiz", "Transferencias"),
+    ]
+    controles_navegacion = []
+    for seccion, icono, etiqueta in opciones_navegacion:
+        boton_nav = ft.IconButton(
+            icon=icono,
+            tooltip=etiqueta,
+            icon_size=25,
+            width=58,
+            height=52,
+            icon_color=colores["texto_secundario"],
+            on_click=lambda e, destino=seccion: navegar_a(destino),
+        )
+        botones_navegacion[seccion] = boton_nav
+        controles_navegacion.append(boton_nav)
+    page.navigation_bar = ft.Container(
+        content=ft.Row(controls=controles_navegacion, spacing=4, scroll=ft.ScrollMode.AUTO),
+        height=64,
+        padding=ft.padding.symmetric(horizontal=8, vertical=4),
         bgcolor=colores["tarjeta"],
-        height=65,
+        border=ft.border.only(top=ft.BorderSide(1, colores["borde"])),
     )
 
     # Botón Flotante
@@ -3391,6 +3538,8 @@ def main(page: ft.Page):
         bgcolor=colores["appbar"],
         on_click=abrir_agregar
     )
+    page.floating_action_button.visible = False
+    page.navigation_bar.visible = False
 
     # Agregar BottomSheets al overlay
     page.overlay.append(bottom_sheet_movimiento)
@@ -3399,6 +3548,8 @@ def main(page: ft.Page):
     page.overlay.append(bottom_sheet_pago_prestamo)
     page.overlay.append(bottom_sheet_credito)
     page.overlay.append(bottom_sheet_pago_credito)
+    page.overlay.append(bottom_sheet_cambiar_pin)
+    page.overlay.append(picker_recuperar_pin)
     page.overlay.append(bottom_sheet_ahorro)
     page.overlay.append(bottom_sheet_monto_ahorro)
     page.overlay.append(bottom_sheet_banco)
@@ -3416,13 +3567,14 @@ def main(page: ft.Page):
             ft.Icon("lock", size=80, color="blue700"),
             ft.Container(height=20),
             txt_pin_titulo,
-            ft.Text("Ingresa 4 dígitos" if not db.tiene_pin() else "", size=14, color="grey600"),
+            txt_pin_instruccion,
             ft.Container(height=30),
             ft.Row(pin_inputs, alignment=ft.MainAxisAlignment.CENTER, spacing=10),
             ft.Container(height=10),
             txt_pin_mensaje,
             ft.Container(height=30),
             btn_saltar_pin,
+            btn_recuperar_pin,
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
         padding=30,
         expand=True,
@@ -3433,8 +3585,10 @@ def main(page: ft.Page):
     try:
         if db.tiene_pin():
             txt_pin_titulo.value = "Ingresa tu PIN"
+            txt_pin_instruccion.value = "Ingresa 4 dígitos"
         else:
             txt_pin_titulo.value = "Crea tu PIN de seguridad"
+            txt_pin_instruccion.value = "Elige un PIN de 4 dígitos para proteger tus datos."
     except:
         txt_pin_titulo.value = "Ingresa tu PIN"
     
