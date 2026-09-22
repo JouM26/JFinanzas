@@ -29,7 +29,9 @@ jobs:
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
-        channel: stable
+        # Flet 0.28.x está basado en Flutter 3.29; fijar la versión evita
+        # cambios incompatibles cuando el canal stable avance.
+        flutter-version: '3.29.3'
 
     # 5. Instalar Flet y dependencias
     - name: Install Dependencies
