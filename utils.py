@@ -2,6 +2,9 @@
 import os
 import pathlib
 import platform
+import datetime
+import json
+import unicodedata
 
 # Importar openpyxl solo si está disponible (no funciona en Android)
 EXCEL_DISPONIBLE = False
@@ -16,6 +19,54 @@ try:
     EXCEL_DISPONIBLE = True
 except:
     pass
+
+
+def crear_pdf_respaldo(datos_json):
+    """Crea un PDF imprimible con todas las tablas del respaldo JSON."""
+    datos = json.loads(datos_json) if isinstance(datos_json, str) else datos_json
+    lineas = ["JFINANZAS - RESPALDO DE DATOS", f"Generado: {datetime.datetime.now():%Y-%m-%d %H:%M}",
+              "", "Este documento es una copia legible. Para restaurar datos, conserva también el respaldo JSON.", ""]
+    for tabla, registros in datos.items():
+        lineas.extend([f"TABLA: {tabla.upper()}", "-" * 72])
+        if not registros:
+            lineas.append("Sin registros")
+        for indice, registro in enumerate(registros, 1):
+            lineas.append(f"Registro {indice}")
+            for clave, valor in registro.items():
+                lineas.append(f"  {clave}: {valor}")
+            lineas.append("")
+
+    def pdf_texto(texto):
+        texto = unicodedata.normalize("NFKD", str(texto)).encode("cp1252", "replace")
+        return b"(" + texto.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)") + b")"
+
+    paginas = [lineas[i:i + 48] for i in range(0, len(lineas), 48)] or [[]]
+    objetos = [b"", b"", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"]
+    ids_paginas = []
+    for pagina in paginas:
+        contenido = [b"BT", b"/F1 9 Tf", b"40 800 Td", b"12 TL"]
+        for linea in pagina:
+            contenido.extend([pdf_texto(linea[:115]), b"Tj", b"T*"])
+        contenido.append(b"ET")
+        stream = b"\n".join(contenido)
+        id_stream = len(objetos)
+        objetos.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
+        id_pagina = len(objetos)
+        objetos.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents {id_stream} 0 R >>".encode())
+        ids_paginas.append(id_pagina)
+    objetos[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    objetos[1] = b"<< /Type /Pages /Kids [" + b" ".join(f"{i} 0 R".encode() for i in ids_paginas) + b"] /Count " + str(len(ids_paginas)).encode() + b" >>"
+    salida = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for numero, objeto in enumerate(objetos, 1):
+        offsets.append(len(salida))
+        salida.extend(f"{numero} 0 obj\n".encode() + objeto + b"\nendobj\n")
+    inicio_xref = len(salida)
+    salida.extend(f"xref\n0 {len(objetos) + 1}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        salida.extend(f"{offset:010d} 00000 n \n".encode())
+    salida.extend(f"trailer\n<< /Size {len(objetos) + 1} /Root 1 0 R >>\nstartxref\n{inicio_xref}\n%%EOF".encode())
+    return bytes(salida)
 
 
 def es_android():

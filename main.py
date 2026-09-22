@@ -12,7 +12,8 @@ from utils import (
     COLORES_CATEGORIAS,
     MESES_NOMBRES,
     MESES_CORTOS,
-    ONBOARDING_PAGES
+    ONBOARDING_PAGES,
+    crear_pdf_respaldo,
 )
 
 # Importar exportar_movimientos_a_excel solo si está disponible
@@ -114,12 +115,22 @@ def main(page: ft.Page):
     
     def guardar_nuevo_pin(pin):
         """Guarda un nuevo PIN"""
+        if len(pin) != 4 or not pin.isdigit():
+            txt_pin_mensaje.value = "El PIN debe tener 4 dígitos numéricos."
+            limpiar_pin()
+            page.update()
+            return
+
         if db.guardar_pin(pin):
             txt_pin_mensaje.value = "✅ PIN creado correctamente"
             page.update()
             import time
             time.sleep(0.5)
             desbloquear_app()
+        else:
+            txt_pin_mensaje.value = "No se pudo guardar el PIN. Inténtalo de nuevo."
+            limpiar_pin()
+            page.update()
     
     def limpiar_pin():
         """Limpia los campos de PIN"""
@@ -140,17 +151,19 @@ def main(page: ft.Page):
             actualizar_vista()
         
         page.update()
-    
+
     def saltar_pin():
         """Permite saltar el PIN (solo si no hay PIN configurado)"""
         if not db.tiene_pin():
             desbloquear_app()
     
-    # Botón para saltar PIN (solo visible si no hay PIN)
+    # En una instalación nueva se debe crear un PIN antes de continuar.
+    # Se conserva la opción para instalaciones anteriores que ya completaron
+    # el onboarding y nunca configuraron un PIN.
     btn_saltar_pin = ft.TextButton(
         "Continuar sin PIN",
         on_click=lambda e: saltar_pin(),
-        visible=not db.tiene_pin()
+        visible=not db.tiene_pin() and not db.es_primera_vez()
     )
     
     # =====================================================
@@ -317,7 +330,8 @@ def main(page: ft.Page):
         label="Método de pago",
         options=[
             ft.dropdown.Option("efectivo", "💵 Efectivo"),
-            ft.dropdown.Option("banco", "🏦 Banco")
+            ft.dropdown.Option("banco", "🏦 Cuenta bancaria"),
+            ft.dropdown.Option("tarjeta_credito", "💳 Tarjeta de crédito"),
         ],
         value="efectivo",
         visible=True,
@@ -332,30 +346,44 @@ def main(page: ft.Page):
     def actualizar_opciones_destino():
         """Actualiza las etiquetas y opciones según el tipo de movimiento"""
         es_ingreso = dropdown_tipo.value == "ingreso"
-        
-        # Cambiar la etiqueta según el tipo
-        if es_ingreso:
-            dropdown_destino_movimiento.label = "Destino del ingreso"
-        else:
-            dropdown_destino_movimiento.label = "Método de pago"
-        
-        dropdown_banco_movimiento.visible = False
-        
-        # Obtener bancos disponibles
-        cuentas = db.obtener_cuentas_bancarias()
-        opciones = []
-        for cuenta in cuentas:
-            id_cuenta, nombre_banco, tipo_cuenta, saldo, limite_credito, fecha_creacion, activa = cuenta
-            opciones.append(ft.dropdown.Option(f"banco_{id_cuenta}", f"{nombre_banco} ({tipo_cuenta})"))
-        dropdown_banco_movimiento.options = opciones
-        if opciones:
-            dropdown_banco_movimiento.value = opciones[0].key
-        
-        page.update()
-    
+
+        dropdown_destino_movimiento.label = "Destino del ingreso" if es_ingreso else "Método de pago"
+        opciones_destino = [
+            ft.dropdown.Option("efectivo", "💵 Efectivo"),
+            ft.dropdown.Option("banco", "🏦 Cuenta bancaria"),
+        ]
+        if not es_ingreso:
+            opciones_destino.append(ft.dropdown.Option("tarjeta_credito", "💳 Tarjeta de crédito"))
+        dropdown_destino_movimiento.options = opciones_destino
+        valores_validos = {opcion.key for opcion in opciones_destino}
+        if dropdown_destino_movimiento.value not in valores_validos:
+            dropdown_destino_movimiento.value = "efectivo"
+
+        actualizar_selector_banco()
+
     def actualizar_selector_banco():
-        """Muestra el selector de banco solo si se elige 'banco'"""
-        dropdown_banco_movimiento.visible = dropdown_destino_movimiento.value == "banco"
+        """Muestra solo cuentas compatibles con el método elegido."""
+        medio_pago = dropdown_destino_movimiento.value
+        requiere_cuenta = medio_pago in ("banco", "tarjeta_credito")
+        dropdown_banco_movimiento.visible = requiere_cuenta
+
+        if medio_pago == "tarjeta_credito":
+            dropdown_banco_movimiento.label = "Selecciona la tarjeta"
+            tipos_permitidos = {"credito"}
+        else:
+            dropdown_banco_movimiento.label = "Selecciona la cuenta bancaria"
+            tipos_permitidos = {"debito", "ahorro", "inversion"}
+
+        cuentas = db.obtener_cuentas_bancarias() if requiere_cuenta else []
+        opciones = [
+            ft.dropdown.Option(f"cuenta_{cuenta[0]}", f"{cuenta[1]} ({cuenta[2]})")
+            for cuenta in cuentas
+            if cuenta[2] in tipos_permitidos
+        ]
+        dropdown_banco_movimiento.options = opciones
+        valores_validos = {opcion.key for opcion in opciones}
+        if dropdown_banco_movimiento.value not in valores_validos:
+            dropdown_banco_movimiento.value = opciones[0].key if opciones else None
         page.update()
 
     # --- Funciones de Lógica ---
@@ -366,9 +394,10 @@ def main(page: ft.Page):
         total_suscripciones = db.obtener_total_suscripciones()
         total_cuotas_prestamos = db.obtener_total_cuotas_prestamos()
         total_cuotas_creditos = db.obtener_total_cuotas_creditos()
+        cuotas_creditos_sin_gasto = db.obtener_cuotas_creditos_no_registradas_como_gasto()
         total_ahorros = db.obtener_total_ahorros()
         total_bancos = db.obtener_saldo_total_bancos()
-        disponible = total - total_suscripciones - total_cuotas_prestamos - total_cuotas_creditos
+        disponible = total - total_suscripciones - total_cuotas_prestamos - cuotas_creditos_sin_gasto
         
         txt_balance_total.value = f"${total:,.0f}"
         txt_ingresos.value = f"${ingresos:,.0f}"
@@ -495,7 +524,7 @@ def main(page: ft.Page):
         ingresos_mes, gastos_mes = db.obtener_balance_mensual(mes_actual, anio_actual)
         total_subs = db.obtener_total_suscripciones()
         total_cuotas = db.obtener_total_cuotas_prestamos()
-        total_creditos = db.obtener_total_cuotas_creditos()
+        total_creditos = db.obtener_cuotas_creditos_para_mes(mes_actual, anio_actual)
         gastos_fijos = total_subs + total_cuotas + total_creditos
         disponible_mes = ingresos_mes - gastos_mes - gastos_fijos
         
@@ -714,10 +743,24 @@ def main(page: ft.Page):
             )
         else:
             for mov in movimientos:
-                if len(mov) == 7:
-                    id_mov, tipo, cat, monto, desc, fecha, modo = mov
+                if len(mov) >= 7:
+                    id_mov, tipo, cat, monto, desc, fecha, modo = mov[:7]
+                    nombre_cuenta = mov[7] if len(mov) > 7 else None
                 else:
                     id_mov, tipo, cat, monto, desc, fecha = mov
+                    modo = None
+                    nombre_cuenta = None
+
+                etiquetas_pago = {
+                    "efectivo": "Efectivo",
+                    "banco": "Banco",
+                    "tarjeta_credito": "Tarjeta",
+                }
+                detalle = f"{cat} · {fecha}"
+                if modo in etiquetas_pago:
+                    detalle += f" · {etiquetas_pago[modo]}"
+                    if nombre_cuenta:
+                        detalle += f": {nombre_cuenta}"
                 
                 icono = "trending_down" if tipo == "gasto" else "trending_up"
                 color_icono = colores["rojo"] if tipo == "gasto" else colores["verde"]
@@ -727,7 +770,7 @@ def main(page: ft.Page):
                         ft.Icon(icono, color=color_icono, size=24),
                         ft.Column([
                             ft.Text(desc, weight=ft.FontWeight.W_500, size=14, color=colores["texto"]),
-                            ft.Text(f"{cat} · {fecha}", size=11, color=colores["texto_secundario"]),
+                            ft.Text(detalle, size=11, color=colores["texto_secundario"]),
                         ], expand=True, spacing=1),
                         ft.Column([
                             ft.Text(f"${monto:,.0f}", weight=ft.FontWeight.BOLD, color=color_icono, size=14),
@@ -1297,7 +1340,7 @@ def main(page: ft.Page):
         ingresos_mes, gastos_mes = db.obtener_balance_mensual(mes_actual, anio_actual)
         total_subs = db.obtener_total_suscripciones()
         total_cuotas = db.obtener_total_cuotas_prestamos()
-        total_creditos = db.obtener_total_cuotas_creditos()
+        total_creditos = db.obtener_cuotas_creditos_para_mes(mes_actual, anio_actual)
         balance_mes = ingresos_mes - gastos_mes - total_subs - total_cuotas - total_creditos
         
         meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
@@ -1664,25 +1707,39 @@ def main(page: ft.Page):
             page.update()
             return
 
-        # Intentar guardar en BD
-        if db.agregar_movimiento(
-            dropdown_tipo.value,
-            dropdown_cat.value,
-            monto,
-            input_desc.value
-        ):
-            # Si usa banco, agregar o retirar el monto de la cuenta
-            if dropdown_destino_movimiento.value == "banco" and dropdown_banco_movimiento.value:
-                # Extraer el ID del banco del valor seleccionado
-                id_cuenta = int(dropdown_banco_movimiento.value.split("_")[1])
-                
-                if dropdown_tipo.value == "ingreso":
-                    # Agregar monto al banco
-                    db.agregar_monto_cuenta(id_cuenta, monto)
-                else:
-                    # Retirar monto del banco (gasto)
-                    db.retirar_monto_cuenta(id_cuenta, monto)
-            
+        medio_pago = dropdown_destino_movimiento.value or "efectivo"
+        cuenta_id = None
+        if medio_pago in ("banco", "tarjeta_credito"):
+            if not dropdown_banco_movimiento.value:
+                input_monto.error_text = (
+                    "Registra una tarjeta en Cuentas Bancarias primero."
+                    if medio_pago == "tarjeta_credito"
+                    else "Registra una cuenta bancaria primero."
+                )
+                page.update()
+                return
+            try:
+                cuenta_id = int(dropdown_banco_movimiento.value.split("_", 1)[1])
+            except (ValueError, IndexError):
+                input_monto.error_text = "Selecciona una cuenta válida."
+                page.update()
+                return
+
+        if registro_editando[0] == "movimiento":
+            if medio_pago == "tarjeta_credito":
+                input_monto.error_text = "Para editar, usa efectivo o una cuenta bancaria."
+                page.update()
+                return
+            exito, mensaje = db.editar_movimiento_financiero(
+                registro_editando[1], dropdown_tipo.value, dropdown_cat.value,
+                monto, input_desc.value, medio_pago, cuenta_id
+            )
+        else:
+            exito, mensaje = db.registrar_movimiento_financiero(
+                dropdown_tipo.value, dropdown_cat.value, monto, input_desc.value,
+                medio_pago, cuenta_id
+            )
+        if exito:
             # Limpiar campos y cerrar diálogo
             input_desc.value = ""
             input_monto.value = ""
@@ -1690,10 +1747,11 @@ def main(page: ft.Page):
             input_monto.error_text = None
             dropdown_banco_movimiento.visible = False
             bottom_sheet_movimiento.open = False
+            registro_editando[0] = None
+            registro_editando[1] = None
             actualizar_vista()
         else:
-            # Mostrar error si falla el guardado
-            input_desc.error_text = "Error al guardar. Intenta de nuevo."
+            input_monto.error_text = mensaje
             page.update()
     
     def guardar_suscripcion(e):
@@ -1908,9 +1966,54 @@ def main(page: ft.Page):
         if db.borrar_credito(id_cred):
             actualizar_vista()
     
+    credito_id_pago = [None]
+
     def registrar_pago_credito_directo(id_cred):
-        if db.registrar_pago_credito(id_cred):
+        info_credito = db.obtener_info_pago_credito(id_cred)
+        if not info_credito:
+            return
+
+        _, tarjeta_id = info_credito
+        if tarjeta_id is None:
+            if db.registrar_pago_credito(id_cred):
+                actualizar_vista()
+            return
+
+        cuentas_pago = [
+            cuenta for cuenta in db.obtener_cuentas_bancarias()
+            if cuenta[2] in ("debito", "ahorro", "inversion")
+        ]
+        if not cuentas_pago:
+            page.show_snack_bar(ft.SnackBar(
+                content=ft.Text("Agrega una cuenta bancaria para registrar el pago de la tarjeta."),
+                bgcolor=colores["naranja"],
+            ))
+            return
+
+        dropdown_credito_cuenta_pago.options = [
+            ft.dropdown.Option(str(cuenta[0]), f"{cuenta[1]} ({cuenta[2]})")
+            for cuenta in cuentas_pago
+        ]
+        dropdown_credito_cuenta_pago.value = str(cuentas_pago[0][0])
+        dropdown_credito_cuenta_pago.error_text = None
+        credito_id_pago[0] = id_cred
+        bottom_sheet_pago_credito.open = True
+        page.update()
+
+    def confirmar_pago_credito(e):
+        if not dropdown_credito_cuenta_pago.value:
+            dropdown_credito_cuenta_pago.error_text = "Selecciona la cuenta de pago."
+            page.update()
+            return
+
+        if db.registrar_pago_credito(
+            credito_id_pago[0], int(dropdown_credito_cuenta_pago.value)
+        ):
+            bottom_sheet_pago_credito.open = False
             actualizar_vista()
+        else:
+            dropdown_credito_cuenta_pago.error_text = "No se pudo registrar el pago. Revisa las cuentas."
+            page.update()
     
     def borrar_cuenta_bancaria(id_cuenta):
         if db.borrar_cuenta_bancaria(id_cuenta):
@@ -2030,6 +2133,12 @@ def main(page: ft.Page):
         text_size=16,
         border_color="indigo700",
         focused_border_color="indigo900"
+    )
+    dropdown_credito_cuenta_pago = ft.Dropdown(
+        label="Pagar desde",
+        options=[],
+        color="black",
+        border_color="indigo700",
     )
     
     # Campos para ahorros
@@ -2203,6 +2312,30 @@ def main(page: ft.Page):
         ),
         is_scroll_controlled=True,
         use_safe_area=True
+    )
+
+    bottom_sheet_pago_credito = ft.BottomSheet(
+        ft.Container(
+            ft.Column(
+                [
+                    ft.Text("💳 Registrar pago de tarjeta", size=20, weight=ft.FontWeight.BOLD),
+                    ft.Text("El pago reducirá la deuda de la tarjeta y se descontará de esta cuenta."),
+                    dropdown_credito_cuenta_pago,
+                    ft.ElevatedButton(
+                        "Confirmar pago",
+                        on_click=confirmar_pago_credito,
+                        width=float("inf"),
+                    ),
+                ],
+                tight=True,
+                spacing=15,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            padding=20,
+            border_radius=ft.border_radius.only(top_left=20, top_right=20),
+        ),
+        is_scroll_controlled=True,
+        use_safe_area=True,
     )
     
     # Variable para almacenar el ID del préstamo al registrar pago
@@ -2515,6 +2648,8 @@ def main(page: ft.Page):
             bottom_sheet_banco.open = True
         else:
             # Limpiar campos de movimiento
+            registro_editando[0] = None
+            registro_editando[1] = None
             input_desc.value = ""
             input_monto.value = ""
             input_desc.error_text = None
@@ -2534,8 +2669,8 @@ def main(page: ft.Page):
     
     def abrir_editar_movimiento(mov):
         """Abre el formulario para editar un movimiento"""
-        if len(mov) == 7:
-            id_mov, tipo, cat, monto, desc, fecha, modo = mov
+        if len(mov) >= 7:
+            id_mov, tipo, cat, monto, desc, fecha, modo = mov[:7]
         else:
             id_mov, tipo, cat, monto, desc, fecha = mov
         
@@ -2546,7 +2681,17 @@ def main(page: ft.Page):
         input_monto.value = str(monto)
         dropdown_tipo.value = tipo
         dropdown_cat.value = cat
-        
+        detalle = db.obtener_movimiento_edicion(id_mov)
+        if detalle and detalle[2] is not None:
+            page.show_snack_bar(ft.SnackBar(content=ft.Text("Las compras con tarjeta se eliminan desde Créditos; aquí solo se editan movimientos de efectivo o banco."), bgcolor=colores["naranja"]))
+            registro_editando[0] = None
+            return
+        medio_pago, cuenta_id = detalle[:2] if detalle else ("efectivo", None)
+        dropdown_destino_movimiento.value = "banco" if medio_pago == "banco" else "efectivo"
+        actualizar_opciones_destino()
+        if cuenta_id is not None:
+            dropdown_banco_movimiento.value = f"cuenta_{cuenta_id}"
+
         bottom_sheet_movimiento.open = True
         page.update()
     
@@ -2627,19 +2772,8 @@ def main(page: ft.Page):
                 datos = db.exportar_datos()
                 if datos:
                     nombre_archivo = f"JFinanzas_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                    ruta_documentos = os.path.join(os.path.expanduser('~'), 'Documents')
-                    ruta_completa = os.path.join(ruta_documentos, nombre_archivo)
-                    
-                    with open(ruta_completa, 'w', encoding='utf-8') as f:
-                        f.write(datos)
-                    
-                    page.show_snack_bar(
-                        ft.SnackBar(
-                            content=ft.Text(f"✅ Backup guardado en: {ruta_completa}"),
-                            bgcolor=colores["verde"],
-                            duration=5000
-                        )
-                    )
+                    json_respaldo_pendiente[0] = datos
+                    json_picker.save_file(file_name=nombre_archivo, dialog_title="Guardar respaldo JSON", allowed_extensions=["json"])
                 else:
                     page.show_snack_bar(
                         ft.SnackBar(content=ft.Text("❌ Error al exportar"), bgcolor=colores["rojo"])
@@ -2648,6 +2782,49 @@ def main(page: ft.Page):
                 page.show_snack_bar(
                     ft.SnackBar(content=ft.Text(f"❌ Error: {ex}"), bgcolor=colores["rojo"])
                 )
+
+        pdf_respaldo_pendiente = [None]
+        json_respaldo_pendiente = [None]
+
+        def guardar_json_respaldo(e: ft.FilePickerResultEvent):
+            if not e.path or json_respaldo_pendiente[0] is None:
+                return
+            try:
+                with open(e.path, "w", encoding="utf-8") as archivo:
+                    archivo.write(json_respaldo_pendiente[0])
+                page.show_snack_bar(ft.SnackBar(content=ft.Text("✅ Respaldo JSON guardado."), bgcolor=colores["verde"]))
+            except Exception as ex:
+                page.show_snack_bar(ft.SnackBar(content=ft.Text(f"❌ No se pudo guardar el respaldo: {ex}"), bgcolor=colores["rojo"]))
+
+        json_picker = ft.FilePicker(on_result=guardar_json_respaldo)
+        page.overlay.append(json_picker)
+
+        def guardar_pdf_respaldo(e: ft.FilePickerResultEvent):
+            if not e.path or pdf_respaldo_pendiente[0] is None:
+                return
+            try:
+                with open(e.path, "wb") as archivo:
+                    archivo.write(pdf_respaldo_pendiente[0])
+                page.show_snack_bar(ft.SnackBar(
+                    content=ft.Text("✅ PDF guardado. Desde el archivo puedes compartirlo por WhatsApp, correo, Drive u otra aplicación."),
+                    bgcolor=colores["verde"], duration=6000
+                ))
+            except Exception as ex:
+                page.show_snack_bar(ft.SnackBar(content=ft.Text(f"❌ No se pudo guardar el PDF: {ex}"), bgcolor=colores["rojo"]))
+
+        pdf_picker = ft.FilePicker(on_result=guardar_pdf_respaldo)
+        page.overlay.append(pdf_picker)
+
+        def exportar_backup_pdf(e):
+            try:
+                datos = db.exportar_datos()
+                if not datos:
+                    raise ValueError("No se pudieron leer los datos para el respaldo.")
+                pdf_respaldo_pendiente[0] = crear_pdf_respaldo(datos)
+                nombre = f"JFinanzas_respaldo_{datetime.datetime.now():%Y%m%d_%H%M%S}.pdf"
+                pdf_picker.save_file(file_name=nombre, dialog_title="Guardar respaldo PDF", allowed_extensions=["pdf"])
+            except Exception as ex:
+                page.show_snack_bar(ft.SnackBar(content=ft.Text(f"❌ Error al crear el PDF: {ex}"), bgcolor=colores["rojo"]))
         
         # FilePicker para importar backup
         def resultado_file_picker(e: ft.FilePickerResultEvent):
@@ -2704,6 +2881,19 @@ def main(page: ft.Page):
                         ]),
                         padding=15,
                         bgcolor=colores["purple_bg"],
+                        border_radius=10,
+                    ),
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon("picture_as_pdf", color=colores["rojo"]),
+                            ft.Column([
+                                ft.Text("Exportar respaldo PDF", weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                                ft.Text("Guarda una copia legible para compartir", size=12, color=colores["texto_secundario"]),
+                            ], expand=True, spacing=2),
+                            ft.IconButton(icon="share", on_click=exportar_backup_pdf, icon_color=colores["texto"])
+                        ]),
+                        padding=15,
+                        bgcolor=colores["rojo_bg"],
                         border_radius=10,
                     ),
                     ft.Divider(height=10, color="transparent"),
@@ -3208,6 +3398,7 @@ def main(page: ft.Page):
     page.overlay.append(bottom_sheet_prestamo)
     page.overlay.append(bottom_sheet_pago_prestamo)
     page.overlay.append(bottom_sheet_credito)
+    page.overlay.append(bottom_sheet_pago_credito)
     page.overlay.append(bottom_sheet_ahorro)
     page.overlay.append(bottom_sheet_monto_ahorro)
     page.overlay.append(bottom_sheet_banco)

@@ -3,20 +3,17 @@ import sqlite3
 import datetime
 import hashlib
 import json
+import hmac
+import secrets
 
 
 class Database:
     def __init__(self, db_path="finanzas.db"):
         self.db_path = db_path
-        try:
-            self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10)
-            self.conn.execute("PRAGMA journal_mode=WAL")
-            self.create_table()
-        except Exception as e:
-            print(f"Error conectando a la base de datos: {e}")
-            # Intentar con base de datos en memoria como fallback
-            self.conn = sqlite3.connect(":memory:", check_same_thread=False)
-            self.create_table()
+        # Nunca sustituir silenciosamente la base persistente por una temporal:
+        # eso haría que la app pareciera funcionar mientras pierde los datos al cerrarse.
+        self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10)
+        self.create_table()
 
     def create_table(self):
         cursor = self.conn.cursor()
@@ -46,7 +43,10 @@ class Database:
                 categoria TEXT,
                 monto REAL,
                 descripcion TEXT,
-                fecha TEXT
+                fecha TEXT,
+                medio_pago TEXT NOT NULL DEFAULT 'efectivo',
+                cuenta_bancaria_id INTEGER,
+                credito_id INTEGER
             )
         """)
         # Tabla de suscripciones
@@ -95,7 +95,9 @@ class Database:
                 meses_pagados INTEGER DEFAULT 0,
                 fecha_compra TEXT,
                 tasa_interes REAL DEFAULT 0,
-                pagado INTEGER DEFAULT 0
+                pagado INTEGER DEFAULT 0,
+                cuenta_bancaria_id INTEGER,
+                movimiento_id INTEGER
             )
         """)
         # Tabla de cuentas bancarias
@@ -119,10 +121,34 @@ class Database:
                 monto REAL NOT NULL,
                 fecha TEXT,
                 descripcion TEXT,
+                credito_id INTEGER,
                 FOREIGN KEY (cuenta_origen) REFERENCES cuentas_bancarias(id),
                 FOREIGN KEY (cuenta_destino) REFERENCES cuentas_bancarias(id)
             )
         """)
+        # Migración aditiva para conservar las bases de datos ya existentes.
+        columnas_nuevas = {
+            "movimientos": {
+                # NULL conserva el desconocimiento del medio de pago de los registros viejos.
+                "medio_pago": "TEXT",
+                "cuenta_bancaria_id": "INTEGER",
+                "credito_id": "INTEGER",
+            },
+            "creditos": {
+                "cuenta_bancaria_id": "INTEGER",
+                "movimiento_id": "INTEGER",
+            },
+            "transferencias": {
+                "credito_id": "INTEGER",
+            },
+        }
+        for tabla, columnas in columnas_nuevas.items():
+            cursor.execute(f"PRAGMA table_info({tabla})")
+            existentes = {fila[1] for fila in cursor.fetchall()}
+            for columna, definicion in columnas.items():
+                if columna not in existentes:
+                    cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {definicion}")
+
         self.conn.commit()
     
     # --- Métodos de Configuración ---
@@ -149,12 +175,40 @@ class Database:
         pin_guardado = self.obtener_config("pin_hash")
         if not pin_guardado:
             return True
-        pin_hash = hashlib.sha256(pin.encode()).hexdigest()
-        return pin_hash == pin_guardado
+        bloqueado_hasta = float(self.obtener_config("pin_bloqueado_hasta", "0") or 0)
+        ahora = datetime.datetime.now().timestamp()
+        if ahora < bloqueado_hasta:
+            return False
+        if pin_guardado.startswith("pbkdf2_sha256$"):
+            _, iteraciones, sal, hash_guardado = pin_guardado.split("$", 3)
+            hash_calculado = hashlib.pbkdf2_hmac(
+                "sha256", pin.encode(), bytes.fromhex(sal), int(iteraciones)
+            ).hex()
+            correcto = hmac.compare_digest(hash_calculado, hash_guardado)
+        else:
+            # Mantiene compatibilidad con los PIN SHA-256 guardados por versiones anteriores.
+            correcto = hmac.compare_digest(hashlib.sha256(pin.encode()).hexdigest(), pin_guardado)
+            if correcto:
+                self.guardar_pin(pin)
+        intentos = int(self.obtener_config("pin_intentos", "0") or 0)
+        if correcto:
+            self.guardar_config("pin_intentos", "0")
+            self.guardar_config("pin_bloqueado_hasta", "0")
+            return True
+        intentos += 1
+        if intentos >= 5:
+            self.guardar_config("pin_intentos", "0")
+            self.guardar_config("pin_bloqueado_hasta", str(ahora + 30))
+        else:
+            self.guardar_config("pin_intentos", str(intentos))
+        return False
     
     def guardar_pin(self, pin):
-        pin_hash = hashlib.sha256(pin.encode()).hexdigest()
-        return self.guardar_config("pin_hash", pin_hash)
+        sal = secrets.token_bytes(16)
+        iteraciones = 310000
+        hash_pin = hashlib.pbkdf2_hmac("sha256", pin.encode(), sal, iteraciones).hex()
+        pin_guardado = f"pbkdf2_sha256${iteraciones}${sal.hex()}${hash_pin}"
+        return self.guardar_config("pin_hash", pin_guardado)
     
     def tiene_pin(self):
         return self.obtener_config("pin_hash") is not None
@@ -227,11 +281,19 @@ class Database:
     def realizar_transferencia(self, cuenta_origen, cuenta_destino, monto, descripcion=""):
         try:
             cursor = self.conn.cursor()
+            if monto <= 0 or cuenta_origen == cuenta_destino:
+                return False
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute("SELECT tipo_cuenta FROM cuentas_bancarias WHERE id = ? AND activa = 1", (cuenta_origen,))
+            origen = cursor.fetchone()
+            cursor.execute("SELECT tipo_cuenta FROM cuentas_bancarias WHERE id = ? AND activa = 1", (cuenta_destino,))
+            destino = cursor.fetchone()
+            if not origen or not destino or origen[0] == "credito" or destino[0] == "credito":
+                self.conn.rollback()
+                return False
+            cursor.execute("UPDATE cuentas_bancarias SET saldo = saldo - ? WHERE id = ?", (monto, cuenta_origen))
+            cursor.execute("UPDATE cuentas_bancarias SET saldo = saldo + ? WHERE id = ?", (monto, cuenta_destino))
             fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-            
-            self.retirar_monto_cuenta(cuenta_origen, monto)
-            self.agregar_monto_cuenta(cuenta_destino, monto)
-            
             cursor.execute("""
                 INSERT INTO transferencias (cuenta_origen, cuenta_destino, monto, fecha, descripcion)
                 VALUES (?, ?, ?, ?, ?)
@@ -239,6 +301,7 @@ class Database:
             self.conn.commit()
             return True
         except Exception as e:
+            self.conn.rollback()
             print(f"Error en transferencia: {e}")
             return False
     
@@ -386,30 +449,35 @@ class Database:
     def buscar_movimientos(self, texto="", categoria=None, tipo=None, fecha_desde=None, fecha_hasta=None):
         try:
             cursor = self.conn.cursor()
-            query = "SELECT * FROM movimientos WHERE 1=1"
+            query = (
+                "SELECT m.id, m.tipo, m.categoria, m.monto, m.descripcion, m.fecha, "
+                "m.medio_pago, c.nombre_banco "
+                "FROM movimientos m LEFT JOIN cuentas_bancarias c "
+                "ON c.id = m.cuenta_bancaria_id WHERE 1=1"
+            )
             params = []
             
             if texto:
-                query += " AND (descripcion LIKE ? OR categoria LIKE ?)"
+                query += " AND (m.descripcion LIKE ? OR m.categoria LIKE ?)"
                 params.extend([f"%{texto}%", f"%{texto}%"])
             
             if categoria:
-                query += " AND categoria = ?"
+                query += " AND m.categoria = ?"
                 params.append(categoria)
             
             if tipo:
-                query += " AND tipo = ?"
+                query += " AND m.tipo = ?"
                 params.append(tipo)
             
             if fecha_desde:
-                query += " AND fecha >= ?"
+                query += " AND m.fecha >= ?"
                 params.append(fecha_desde)
             
             if fecha_hasta:
-                query += " AND fecha <= ?"
+                query += " AND m.fecha <= ?"
                 params.append(fecha_hasta)
             
-            query += " ORDER BY id DESC"
+            query += " ORDER BY m.id DESC"
             cursor.execute(query, params)
             return cursor.fetchall()
         except:
@@ -422,7 +490,7 @@ class Database:
             cursor = self.conn.cursor()
             datos = {}
             
-            tablas = ['movimientos', 'suscripciones', 'prestamos', 'ahorros', 'creditos', 'cuentas_bancarias', 'presupuestos']
+            tablas = ['movimientos', 'suscripciones', 'prestamos', 'ahorros', 'creditos', 'cuentas_bancarias', 'presupuestos', 'transferencias']
             
             for tabla in tablas:
                 cursor.execute(f"SELECT * FROM {tabla}")
@@ -439,21 +507,28 @@ class Database:
         try:
             datos = json.loads(json_data)
             cursor = self.conn.cursor()
-            
+            tablas_permitidas = {"movimientos", "suscripciones", "prestamos", "ahorros", "creditos", "cuentas_bancarias", "presupuestos", "transferencias"}
+            if not isinstance(datos, dict) or not datos or not set(datos).issubset(tablas_permitidas):
+                return False
+            cursor.execute("BEGIN IMMEDIATE")
             for tabla, registros in datos.items():
+                if not isinstance(registros, list):
+                    raise ValueError(f"Formato inválido en {tabla}")
+                cursor.execute(f"PRAGMA table_info({tabla})")
+                columnas_validas = {fila[1] for fila in cursor.fetchall()}
                 for registro in registros:
+                    if not isinstance(registro, dict) or not set(registro).issubset(columnas_validas):
+                        raise ValueError(f"Registro inválido en {tabla}")
                     columnas = ', '.join(registro.keys())
                     placeholders = ', '.join(['?' for _ in registro])
                     valores = list(registro.values())
-                    
-                    try:
-                        cursor.execute(f"INSERT OR REPLACE INTO {tabla} ({columnas}) VALUES ({placeholders})", valores)
-                    except:
-                        pass
-            
+                    if not columnas:
+                        continue
+                    cursor.execute(f"INSERT OR REPLACE INTO {tabla} ({columnas}) VALUES ({placeholders})", valores)
             self.conn.commit()
             return True
         except Exception as e:
+            self.conn.rollback()
             print(f"Error al importar: {e}")
             return False
 
@@ -472,11 +547,24 @@ class Database:
     def obtener_movimientos(self):
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT * FROM movimientos ORDER BY id DESC")
+            cursor.execute(
+                "SELECT m.id, m.tipo, m.categoria, m.monto, m.descripcion, m.fecha, "
+                "m.medio_pago, c.nombre_banco "
+                "FROM movimientos m LEFT JOIN cuentas_bancarias c "
+                "ON c.id = m.cuenta_bancaria_id ORDER BY m.id DESC"
+            )
             return cursor.fetchall()
         except Exception as e:
             print(f"Error al obtener movimientos: {e}")
             return []
+
+    def obtener_movimiento_edicion(self, id_movimiento):
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT medio_pago, cuenta_bancaria_id, credito_id FROM movimientos WHERE id = ?", (id_movimiento,))
+            return cursor.fetchone()
+        except Exception:
+            return None
 
     def obtener_balance(self):
         try:
@@ -564,9 +652,179 @@ class Database:
             return False
 
     def borrar_movimiento(self, id_movimiento):
-        cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM movimientos WHERE id = ?", (id_movimiento,))
-        self.conn.commit()
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                "SELECT tipo, monto, medio_pago, cuenta_bancaria_id, credito_id "
+                "FROM movimientos WHERE id = ?",
+                (id_movimiento,),
+            )
+            movimiento = cursor.fetchone()
+            if not movimiento:
+                self.conn.rollback()
+                return False
+
+            tipo, monto, medio_pago, cuenta_id, credito_id = movimiento
+            if cuenta_id is not None:
+                # Deshacer el efecto bancario del movimiento eliminado.
+                delta = -monto if tipo == "ingreso" else monto
+                cursor.execute(
+                    "UPDATE cuentas_bancarias SET saldo = saldo + ? WHERE id = ?",
+                    (delta, cuenta_id),
+                )
+            if credito_id is not None:
+                cursor.execute(
+                    "SELECT cuenta_origen, cuenta_destino, monto FROM transferencias "
+                    "WHERE credito_id = ?",
+                    (credito_id,),
+                )
+                pagos = cursor.fetchall()
+                for cuenta_origen, cuenta_destino, monto_pago in pagos:
+                    cursor.execute(
+                        "UPDATE cuentas_bancarias SET saldo = saldo + ? WHERE id = ?",
+                        (monto_pago, cuenta_origen),
+                    )
+                    cursor.execute(
+                        "UPDATE cuentas_bancarias SET saldo = saldo - ? WHERE id = ?",
+                        (monto_pago, cuenta_destino),
+                    )
+                cursor.execute("DELETE FROM transferencias WHERE credito_id = ?", (credito_id,))
+                cursor.execute("UPDATE creditos SET pagado = 1 WHERE id = ?", (credito_id,))
+
+            cursor.execute("DELETE FROM movimientos WHERE id = ?", (id_movimiento,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error al borrar movimiento: {e}")
+            return False
+
+    def editar_movimiento_financiero(self, id_movimiento, tipo, categoria, monto, descripcion, medio_pago, cuenta_id=None):
+        """Actualiza un movimiento y recalcula en una transacción su efecto en cuentas."""
+        if tipo not in ("ingreso", "gasto") or monto <= 0 or medio_pago not in ("efectivo", "banco"):
+            return False, "Por seguridad, una compra con tarjeta registrada no se puede editar aquí."
+        if medio_pago == "banco" and cuenta_id is None:
+            return False, "Selecciona una cuenta bancaria."
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute("SELECT tipo, monto, cuenta_bancaria_id, credito_id FROM movimientos WHERE id = ?", (id_movimiento,))
+            anterior = cursor.fetchone()
+            if not anterior:
+                raise ValueError("El movimiento ya no existe.")
+            tipo_anterior, monto_anterior, cuenta_anterior, credito_anterior = anterior
+            if credito_anterior is not None:
+                raise ValueError("Las compras con tarjeta se administran desde Créditos y no se pueden editar aquí.")
+            if cuenta_id is not None:
+                cursor.execute("SELECT tipo_cuenta FROM cuentas_bancarias WHERE id = ? AND activa = 1", (cuenta_id,))
+                cuenta = cursor.fetchone()
+                if not cuenta or cuenta[0] == "credito":
+                    raise ValueError("Selecciona una cuenta bancaria activa.")
+            if cuenta_anterior is not None:
+                delta_anterior = monto_anterior if tipo_anterior == "gasto" else -monto_anterior
+                cursor.execute("UPDATE cuentas_bancarias SET saldo = saldo + ? WHERE id = ?", (delta_anterior, cuenta_anterior))
+            if medio_pago == "banco":
+                delta_nuevo = -monto if tipo == "gasto" else monto
+                cursor.execute("UPDATE cuentas_bancarias SET saldo = saldo + ? WHERE id = ?", (delta_nuevo, cuenta_id))
+            cursor.execute("UPDATE movimientos SET tipo=?, categoria=?, monto=?, descripcion=?, medio_pago=?, cuenta_bancaria_id=? WHERE id=?",
+                           (tipo, categoria, monto, descripcion, medio_pago, cuenta_id if medio_pago == "banco" else None, id_movimiento))
+            self.conn.commit()
+            return True, ""
+        except ValueError as e:
+            self.conn.rollback()
+            return False, str(e)
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error al editar movimiento: {e}")
+            return False, "No se pudo actualizar el movimiento."
+
+    def registrar_movimiento_financiero(
+        self, tipo, categoria, monto, descripcion, medio_pago="efectivo", cuenta_id=None
+    ):
+        """Registra movimiento y su efecto bancario/crédito en una transacción."""
+        if tipo not in ("ingreso", "gasto") or monto <= 0:
+            return False, "El tipo de movimiento o el monto no son válidos."
+        if medio_pago not in ("efectivo", "banco", "tarjeta_credito"):
+            return False, "Selecciona un método de pago válido."
+        if medio_pago == "tarjeta_credito" and tipo != "gasto":
+            return False, "Las tarjetas de crédito solo se pueden usar para gastos."
+        if medio_pago != "efectivo" and cuenta_id is None:
+            return False, "Selecciona una cuenta para este movimiento."
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+
+            cuenta = None
+            if cuenta_id is not None:
+                cursor.execute(
+                    "SELECT nombre_banco, tipo_cuenta, saldo, limite_credito "
+                    "FROM cuentas_bancarias WHERE id = ? AND activa = 1",
+                    (cuenta_id,),
+                )
+                cuenta = cursor.fetchone()
+                if not cuenta:
+                    raise ValueError("La cuenta seleccionada ya no está disponible.")
+
+                nombre_cuenta, tipo_cuenta, saldo, limite = cuenta
+                saldo = saldo or 0
+                limite = limite or 0
+                es_tarjeta = tipo_cuenta == "credito"
+                if medio_pago == "tarjeta_credito" and not es_tarjeta:
+                    raise ValueError("Selecciona una cuenta registrada como tarjeta de crédito.")
+                if medio_pago == "banco" and es_tarjeta:
+                    raise ValueError("Para pagar con tarjeta, elige el método de tarjeta de crédito.")
+                if es_tarjeta and limite > 0 and abs(saldo) + monto > limite:
+                    raise ValueError("El gasto supera el crédito disponible de esta tarjeta.")
+
+            fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            cursor.execute(
+                "INSERT INTO movimientos "
+                "(tipo, categoria, monto, descripcion, fecha, medio_pago, cuenta_bancaria_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tipo, categoria, monto, descripcion, fecha, medio_pago, cuenta_id),
+            )
+            movimiento_id = cursor.lastrowid
+
+            if cuenta_id is not None:
+                # Ingresos aumentan el saldo; gastos reducen el saldo o crédito disponible.
+                if medio_pago == "tarjeta_credito":
+                    cursor.execute(
+                        "UPDATE cuentas_bancarias SET saldo = -ABS(saldo) - ? WHERE id = ?",
+                        (monto, cuenta_id),
+                    )
+                else:
+                    delta = monto if tipo == "ingreso" else -monto
+                    cursor.execute(
+                        "UPDATE cuentas_bancarias SET saldo = saldo + ? WHERE id = ?",
+                        (delta, cuenta_id),
+                    )
+
+            if medio_pago == "tarjeta_credito":
+                # Compras capturadas desde Inicio se registran por defecto a 1 cuota y 0%.
+                cursor.execute(
+                    "INSERT INTO creditos "
+                    "(descripcion, banco, monto_total, meses_sin_intereses, cuota_mensual, "
+                    "fecha_compra, tasa_interes, cuenta_bancaria_id, movimiento_id) "
+                    "VALUES (?, ?, ?, 1, ?, ?, 0, ?, ?)",
+                    (descripcion, nombre_cuenta, monto, monto, fecha[:10], cuenta_id, movimiento_id),
+                )
+                credito_id = cursor.lastrowid
+                cursor.execute(
+                    "UPDATE movimientos SET credito_id = ? WHERE id = ?",
+                    (credito_id, movimiento_id),
+                )
+
+            self.conn.commit()
+            return True, ""
+        except ValueError as e:
+            self.conn.rollback()
+            return False, str(e)
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error al registrar movimiento financiero: {e}")
+            return False, "No se pudo guardar el movimiento. Intenta de nuevo."
     
     # --- Métodos para Préstamos ---
     
@@ -745,7 +1003,11 @@ class Database:
     def obtener_creditos(self):
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT * FROM creditos WHERE pagado = 0 ORDER BY fecha_compra DESC")
+            cursor.execute(
+                "SELECT id, descripcion, banco, monto_total, meses_sin_intereses, "
+                "cuota_mensual, meses_pagados, fecha_compra, tasa_interes, pagado "
+                "FROM creditos WHERE pagado = 0 ORDER BY fecha_compra DESC"
+            )
             return cursor.fetchall()
         except Exception as e:
             print(f"Error al obtener créditos: {e}")
@@ -760,6 +1022,47 @@ class Database:
         except Exception as e:
             print(f"Error al obtener total de cuotas: {e}")
             return 0
+
+    def obtener_cuotas_creditos_no_registradas_como_gasto(self):
+        """Cuotas de créditos manuales, que no tienen un gasto asociado."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT SUM(cuota_mensual) FROM creditos "
+                "WHERE pagado = 0 AND movimiento_id IS NULL"
+            )
+            return cursor.fetchone()[0] or 0
+        except Exception as e:
+            print(f"Error al calcular cuotas no asociadas a gastos: {e}")
+            return 0
+
+    def obtener_cuotas_creditos_para_mes(self, mes, anio):
+        """No vuelve a descontar en el mes de compra un gasto ya registrado."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT SUM(cuota_mensual) FROM creditos WHERE pagado = 0 AND ("
+                "movimiento_id IS NULL OR substr(fecha_compra, 1, 7) != ?) ",
+                (f"{anio:04d}-{mes:02d}",),
+            )
+            return cursor.fetchone()[0] or 0
+        except Exception as e:
+            print(f"Error al calcular cuotas del mes: {e}")
+            return 0
+
+    def obtener_pagos_tarjeta_mes(self, mes, anio):
+        """Pagos de tarjeta registrados como transferencias en el mes."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT SUM(monto) FROM transferencias WHERE credito_id IS NOT NULL "
+                "AND strftime('%m', fecha) = ? AND strftime('%Y', fecha) = ?",
+                (f"{mes:02d}", str(anio)),
+            )
+            return cursor.fetchone()[0] or 0
+        except Exception as e:
+            print(f"Error al calcular pagos de tarjeta del mes: {e}")
+            return 0
     
     def obtener_deuda_total_creditos(self):
         try:
@@ -772,14 +1075,70 @@ class Database:
             print(f"Error al obtener deuda total de créditos: {e}")
             return 0
     
-    def registrar_pago_credito(self, id_credito):
+    def obtener_info_pago_credito(self, id_credito):
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT meses_sin_intereses, meses_pagados FROM creditos WHERE id = ?", (id_credito,))
+            cursor.execute(
+                "SELECT descripcion, cuenta_bancaria_id FROM creditos WHERE id = ? AND pagado = 0",
+                (id_credito,),
+            )
+            return cursor.fetchone()
+        except Exception as e:
+            print(f"Error al consultar el crédito: {e}")
+            return None
+
+    def registrar_pago_credito(self, id_credito, cuenta_pago_id=None):
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                "SELECT descripcion, meses_sin_intereses, meses_pagados, cuota_mensual, "
+                "cuenta_bancaria_id FROM creditos WHERE id = ? AND pagado = 0",
+                (id_credito,),
+            )
             result = cursor.fetchone()
             if result:
-                meses_totales, meses_pagados = result
+                descripcion, meses_totales, meses_pagados, cuota, tarjeta_id = result
                 nuevos_meses_pagados = meses_pagados + 1
+
+                if tarjeta_id is not None:
+                    if cuenta_pago_id is None:
+                        self.conn.rollback()
+                        return False
+                    cursor.execute(
+                        "SELECT saldo FROM cuentas_bancarias "
+                        "WHERE id = ? AND activa = 1 AND tipo_cuenta != 'credito'",
+                        (cuenta_pago_id,),
+                    )
+                    cuenta_pago = cursor.fetchone()
+                    if not cuenta_pago:
+                        self.conn.rollback()
+                        return False
+                    cursor.execute(
+                        "SELECT saldo FROM cuentas_bancarias "
+                        "WHERE id = ? AND activa = 1 AND tipo_cuenta = 'credito'",
+                        (tarjeta_id,),
+                    )
+                    tarjeta = cursor.fetchone()
+                    if not tarjeta:
+                        self.conn.rollback()
+                        return False
+
+                    fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                    cursor.execute(
+                        "UPDATE cuentas_bancarias SET saldo = saldo - ? WHERE id = ?",
+                        (cuota, cuenta_pago_id),
+                    )
+                    cursor.execute(
+                        "UPDATE cuentas_bancarias SET saldo = saldo + ? WHERE id = ?",
+                        (cuota, tarjeta_id),
+                    )
+                    cursor.execute(
+                        "INSERT INTO transferencias "
+                        "(cuenta_origen, cuenta_destino, monto, fecha, descripcion, credito_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (cuenta_pago_id, tarjeta_id, cuota, fecha, f"Pago de crédito: {descripcion}", id_credito),
+                    )
                 
                 if nuevos_meses_pagados >= meses_totales:
                     cursor.execute("UPDATE creditos SET meses_pagados = ?, pagado = 1 WHERE id = ?", 
@@ -789,13 +1148,21 @@ class Database:
                                    (nuevos_meses_pagados, id_credito))
                 self.conn.commit()
                 return True
+            self.conn.rollback()
         except Exception as e:
+            self.conn.rollback()
             print(f"Error al registrar pago de crédito: {e}")
             return False
     
     def borrar_credito(self, id_credito):
         try:
             cursor = self.conn.cursor()
+            cursor.execute("SELECT movimiento_id FROM creditos WHERE id = ?", (id_credito,))
+            credito = cursor.fetchone()
+            if credito and credito[0] is not None:
+                # Si el crédito nació de un gasto de Inicio, eliminarlo también
+                # revierte el gasto y el saldo de la tarjeta.
+                return self.borrar_movimiento(credito[0])
             cursor.execute("UPDATE creditos SET pagado = 1 WHERE id = ?", (id_credito,))
             self.conn.commit()
             return True
@@ -807,6 +1174,8 @@ class Database:
     
     def agregar_cuenta_bancaria(self, nombre_banco, tipo_cuenta, saldo_inicial=0, limite_credito=0):
         try:
+            if tipo_cuenta == "credito":
+                saldo_inicial = -abs(saldo_inicial)
             cursor = self.conn.cursor()
             fecha_creacion = datetime.datetime.now().strftime("%Y-%m-%d")
             cursor.execute("INSERT INTO cuentas_bancarias (nombre_banco, tipo_cuenta, saldo, limite_credito, fecha_creacion) VALUES (?, ?, ?, ?, ?)",
