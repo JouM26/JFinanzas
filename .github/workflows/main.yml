@@ -18,6 +18,7 @@ jobs:
       with:
         distribution: 'temurin'
         java-version: '17'
+        cache: gradle
 
     # 3. Instalar Python
     - name: Setup Python
@@ -45,7 +46,22 @@ jobs:
 
     # 6. Compilar la APK
     - name: Build APK
-      run: flet build apk --template flet_build_template --verbose
+      shell: bash
+      run: |
+        for attempt in 1 2 3; do
+          if flet build apk --template flet_build_template --verbose 2>&1 | tee /tmp/flet-build.log; then
+            exit 0
+          else
+            build_status=${PIPESTATUS[0]}
+          fi
+
+          if ! grep -qE 'Too Many Requests|status code 429' /tmp/flet-build.log || [ "$attempt" -eq 3 ]; then
+            exit "$build_status"
+          fi
+
+          echo "Maven Central limitó temporalmente las descargas (HTTP 429). Reintentando en $((attempt * 20)) segundos..."
+          sleep $((attempt * 20))
+        done
 
     # 7. Subir el resultado para que lo descargues
     - name: Upload APK
