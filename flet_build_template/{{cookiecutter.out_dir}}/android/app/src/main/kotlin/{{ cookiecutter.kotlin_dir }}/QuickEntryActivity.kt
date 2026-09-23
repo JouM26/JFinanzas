@@ -186,28 +186,26 @@ class QuickEntryActivity : Activity() {
             return
         }
 
-        val acceptedType = if (method == "tarjeta_credito") "credito" else null
         val accountNames = mutableListOf<String>()
         val ids = mutableListOf<Long>()
+        val registeredAccountTypes = mutableListOf<String>()
         try {
             openDatabase().use { database ->
-                val cursor = if (acceptedType == null) {
-                    database.rawQuery(
-                        "SELECT id, nombre_banco, tipo_cuenta FROM cuentas_bancarias " +
-                            "WHERE activa = 1 AND tipo_cuenta IN ('debito','ahorro','inversion') ORDER BY nombre_banco",
-                        null
-                    )
-                } else {
-                    database.rawQuery(
-                        "SELECT id, nombre_banco, tipo_cuenta FROM cuentas_bancarias " +
-                            "WHERE activa = 1 AND tipo_cuenta = ? ORDER BY nombre_banco",
-                        arrayOf(acceptedType)
-                    )
-                }
+                val cursor = database.rawQuery(
+                    "SELECT id, nombre_banco, tipo_cuenta FROM cuentas_bancarias " +
+                        "WHERE activa = 1 ORDER BY nombre_banco",
+                    null
+                )
                 cursor.use {
                     while (it.moveToNext()) {
-                        ids.add(it.getLong(0))
-                        accountNames.add("${it.getString(1)} (${it.getString(2)})")
+                        val accountType = it.getString(2)
+                        registeredAccountTypes.add(accountType)
+                        val isCredit = isCreditAccountType(accountType)
+                        val isValidForMethod = if (method == "tarjeta_credito") isCredit else !isCredit
+                        if (isValidForMethod) {
+                            ids.add(it.getLong(0))
+                            accountNames.add("${it.getString(1)} (${it.getString(2)})")
+                        }
                     }
                 }
             }
@@ -215,13 +213,15 @@ class QuickEntryActivity : Activity() {
             accountField.adapter = ArrayAdapter(
                 this,
                 android.R.layout.simple_spinner_dropdown_item,
-                if (accountNames.isEmpty()) listOf("No hay cuentas registradas") else accountNames
+                if (accountNames.isEmpty()) listOf("Sin cuentas compatibles") else accountNames
             )
             if (accountNames.isEmpty()) {
-                paymentNote.text = if (method == "tarjeta_credito") {
-                    "Registra primero una tarjeta de crédito en la app."
+                paymentNote.text = if (registeredAccountTypes.isEmpty()) {
+                    "No hay cuentas bancarias registradas en la base de datos de la app."
+                } else if (method == "tarjeta_credito") {
+                    "Hay cuentas, pero ninguna está registrada como tarjeta de crédito."
                 } else {
-                    "Registra primero una cuenta bancaria en la app."
+                    "Hay cuentas, pero son tarjetas de crédito. Elige ese método para registrar el gasto."
                 }
             }
         } catch (exception: Exception) {
@@ -234,6 +234,11 @@ class QuickEntryActivity : Activity() {
         1 -> "banco"
         2 -> "tarjeta_credito"
         else -> "efectivo"
+    }
+
+    private fun isCreditAccountType(value: String?): Boolean {
+        val normalized = value.orEmpty().trim().lowercase(Locale.ROOT).replace("é", "e")
+        return normalized == "credito" || normalized == "tarjeta de credito" || normalized == "credit card"
     }
 
     private fun saveMovement() {
@@ -289,10 +294,10 @@ class QuickEntryActivity : Activity() {
                     currentBalance = it.getDouble(2)
                     creditLimit = it.getDouble(3)
                 }
-                if (method == "tarjeta_credito" && accountType != "credito") {
+                if (method == "tarjeta_credito" && !isCreditAccountType(accountType)) {
                     error("Selecciona una tarjeta de crédito registrada")
                 }
-                if (method == "banco" && accountType == "credito") {
+                if (method == "banco" && isCreditAccountType(accountType)) {
                     error("Para pagar con tarjeta, selecciona Tarjeta de crédito")
                 }
                 if (method == "tarjeta_credito" && creditLimit > 0 && kotlin.math.abs(currentBalance) + amount > creditLimit) {
@@ -362,13 +367,15 @@ class QuickEntryActivity : Activity() {
     }
 
     private fun openDatabase(): SQLiteDatabase {
-        // Serious Python ejecuta la app desde application-support/data;
-        // en Android ese directorio corresponde a filesDir/data.
-        val dataDirectory = File(filesDir, "data")
+        // Algunas versiones de Serious Python guardaron la base en otra ruta
+        // interna. Preferimos el archivo que ya contiene las cuentas del usuario.
+        val databaseFile = resolveDatabaseFile()
+        val dataDirectory = databaseFile.parentFile
+            ?: error("No se pudo determinar la carpeta de datos de la app")
         if (!dataDirectory.exists() && !dataDirectory.mkdirs()) {
             error("No se pudo preparar el almacenamiento de la app")
         }
-        val database = SQLiteDatabase.openOrCreateDatabase(File(dataDirectory, "finanzas.db"), null)
+        val database = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
         // PRAGMA devuelve una fila y debe ejecutarse con rawQuery, no execSQL.
         database.rawQuery("PRAGMA busy_timeout=10000", null).use { it.moveToFirst() }
         database.execSQL(
@@ -395,6 +402,50 @@ class QuickEntryActivity : Activity() {
         ensureMovementColumn(database, "cuenta_bancaria_id", "INTEGER")
         ensureMovementColumn(database, "credito_id", "INTEGER")
         return database
+    }
+
+    private fun resolveDatabaseFile(): File {
+        val possibleFiles = listOf(
+            File(filesDir, "data/finanzas.db"),
+            File(filesDir, "flet/py/data/finanzas.db"),
+            File(filesDir, "flet/data/finanzas.db"),
+            File(filesDir, "flet/py/finanzas.db")
+        )
+        val existing = possibleFiles.filter { it.isFile }.mapNotNull { file ->
+            try {
+                val db = SQLiteDatabase.openDatabase(
+                    file.absolutePath,
+                    null,
+                    SQLiteDatabase.OPEN_READONLY
+                )
+                val counts = db.use {
+                    Pair(
+                        countRows(it, "cuentas_bancarias", "activa = 1"),
+                        countRows(it, "movimientos")
+                    )
+                }
+                Triple(file, counts.first, counts.second)
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return existing.maxWithOrNull(
+            compareBy<Triple<File, Int, Int>> { it.second }
+                .thenBy { it.third }
+                .thenBy { it.first.lastModified() }
+        )?.first ?: possibleFiles.first()
+    }
+
+    private fun countRows(database: SQLiteDatabase, table: String, condition: String = ""): Int {
+        val exists = database.rawQuery(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            arrayOf(table)
+        ).use { it.moveToFirst() }
+        if (!exists) return 0
+        val where = if (condition.isEmpty()) "" else " WHERE $condition"
+        return database.rawQuery("SELECT COUNT(*) FROM $table$where", null).use {
+            if (it.moveToFirst()) it.getInt(0) else 0
+        }
     }
 
     private fun label(text: String) = TextView(this).apply {

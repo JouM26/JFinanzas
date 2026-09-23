@@ -5,7 +5,7 @@
     android:orientation="horizontal"
     android:gravity="center"
     android:padding="3dp"
-    android:background="#FFF5F7FA">
+    android:background="@android:color/transparent">
 
     <Button
         android:id="@+id/widget_income"
