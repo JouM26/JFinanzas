@@ -35,6 +35,10 @@ class QuickEntryActivity : Activity() {
     private lateinit var descriptionField: EditText
     private lateinit var amountField: EditText
     private lateinit var categoryField: Spinner
+    private lateinit var paymentMethodField: Spinner
+    private lateinit var accountField: Spinner
+    private lateinit var paymentNote: TextView
+    private var accountIds: List<Long> = emptyList()
     private var movementType: String = "gasto"
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,13 +63,13 @@ class QuickEntryActivity : Activity() {
         }
         root.addView(title, matchWrap())
 
-        val note = TextView(this).apply {
+        paymentNote = TextView(this).apply {
             text = "Registro rápido · medio de pago: efectivo"
             textSize = 14f
             setTextColor(Color.DKGRAY)
             setPadding(0, dp(6), 0, dp(12))
         }
-        root.addView(note, matchWrap())
+        root.addView(paymentNote, matchWrap())
 
         descriptionField = EditText(this).apply {
             hint = "Descripción"
@@ -76,8 +80,28 @@ class QuickEntryActivity : Activity() {
 
         categoryField = Spinner(this).apply {
             adapter = ArrayAdapter(this@QuickEntryActivity, android.R.layout.simple_spinner_dropdown_item, CATEGORIES)
+            if (isIncome) setSelection(CATEGORIES.indexOf("Salario"))
         }
         root.addView(categoryField, matchWrap())
+
+        val paymentOptions = if (isIncome) {
+            arrayOf("Efectivo", "Cuenta bancaria")
+        } else {
+            arrayOf("Efectivo", "Cuenta bancaria", "Tarjeta de crédito")
+        }
+        paymentMethodField = Spinner(this).apply {
+            adapter = ArrayAdapter(this@QuickEntryActivity, android.R.layout.simple_spinner_dropdown_item, paymentOptions)
+        }
+        root.addView(paymentMethodField, matchWrap())
+
+        accountField = Spinner(this)
+        root.addView(accountField, matchWrap())
+        paymentMethodField.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                updatePaymentAccountOptions()
+            }
+        }
 
         amountField = EditText(this).apply {
             hint = "Monto"
@@ -134,8 +158,79 @@ class QuickEntryActivity : Activity() {
         actions.addView(save)
         root.addView(actions, matchWrap())
 
-        setContentView(root)
+        val scrollContainer = android.widget.ScrollView(this).apply {
+            setBackgroundColor(Color.WHITE)
+            isFillViewport = true
+            addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        setContentView(scrollContainer)
+        updatePaymentAccountOptions()
         window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
+    private fun updatePaymentAccountOptions() {
+        val method = selectedPaymentMethod()
+        val requiresAccount = method != "efectivo"
+        accountField.visibility = if (requiresAccount) android.view.View.VISIBLE else android.view.View.GONE
+        paymentNote.text = when (method) {
+            "banco" -> "El saldo de la cuenta seleccionada se actualizará al guardar."
+            "tarjeta_credito" -> "La compra se agregará a Créditos (1 cuota, sin intereses)."
+            else -> "Registro rápido · medio de pago: efectivo"
+        }
+
+        if (!requiresAccount) {
+            accountIds = emptyList()
+            return
+        }
+
+        val acceptedType = if (method == "tarjeta_credito") "credito" else null
+        val accountNames = mutableListOf<String>()
+        val ids = mutableListOf<Long>()
+        try {
+            openDatabase().use { database ->
+                val cursor = if (acceptedType == null) {
+                    database.rawQuery(
+                        "SELECT id, nombre_banco, tipo_cuenta FROM cuentas_bancarias " +
+                            "WHERE activa = 1 AND tipo_cuenta IN ('debito','ahorro','inversion') ORDER BY nombre_banco",
+                        null
+                    )
+                } else {
+                    database.rawQuery(
+                        "SELECT id, nombre_banco, tipo_cuenta FROM cuentas_bancarias " +
+                            "WHERE activa = 1 AND tipo_cuenta = ? ORDER BY nombre_banco",
+                        arrayOf(acceptedType)
+                    )
+                }
+                cursor.use {
+                    while (it.moveToNext()) {
+                        ids.add(it.getLong(0))
+                        accountNames.add("${it.getString(1)} (${it.getString(2)})")
+                    }
+                }
+            }
+            accountIds = ids
+            accountField.adapter = ArrayAdapter(
+                this,
+                android.R.layout.simple_spinner_dropdown_item,
+                if (accountNames.isEmpty()) listOf("No hay cuentas registradas") else accountNames
+            )
+            if (accountNames.isEmpty()) {
+                paymentNote.text = if (method == "tarjeta_credito") {
+                    "Registra primero una tarjeta de crédito en la app."
+                } else {
+                    "Registra primero una cuenta bancaria en la app."
+                }
+            }
+        } catch (exception: Exception) {
+            accountIds = emptyList()
+            paymentNote.text = "No se pudieron cargar las cuentas: ${exception.localizedMessage}"
+        }
+    }
+
+    private fun selectedPaymentMethod(): String = when (paymentMethodField.selectedItemPosition) {
+        1 -> "banco"
+        2 -> "tarjeta_credito"
+        else -> "efectivo"
     }
 
     private fun saveMovement() {
@@ -153,15 +248,16 @@ class QuickEntryActivity : Activity() {
 
         var database: SQLiteDatabase? = null
         try {
-            // Serious Python ejecuta la app desde application-support/data;
-            // en Android ese directorio corresponde a filesDir/data.
-            val dataDirectory = File(filesDir, "data")
-            if (!dataDirectory.exists() && !dataDirectory.mkdirs()) {
-                error("No se pudo preparar el almacenamiento de la app")
+            val method = selectedPaymentMethod()
+            if (movementType == "ingreso" && method == "tarjeta_credito") {
+                error("Los ingresos no se pueden registrar con tarjeta de crédito")
             }
-            val databaseFile = File(dataDirectory, "finanzas.db")
-            database = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
-            database.execSQL("PRAGMA busy_timeout=10000")
+            val accountId = if (method == "efectivo") null else accountIds.getOrNull(accountField.selectedItemPosition)
+            if (method != "efectivo" && accountId == null) {
+                error("Selecciona una cuenta registrada para este medio de pago")
+            }
+
+            database = openDatabase()
             database.execSQL(
                 "CREATE TABLE IF NOT EXISTS movimientos (" +
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, tipo TEXT, categoria TEXT, " +
@@ -173,28 +269,106 @@ class QuickEntryActivity : Activity() {
             ensureMovementColumn(database, "cuenta_bancaria_id", "INTEGER")
             ensureMovementColumn(database, "credito_id", "INTEGER")
 
+            var accountName: String? = null
+            var accountType: String? = null
+            var currentBalance = 0.0
+            var creditLimit = 0.0
+            if (accountId != null) {
+                val cursor = database.rawQuery(
+                    "SELECT nombre_banco, tipo_cuenta, COALESCE(saldo, 0), COALESCE(limite_credito, 0) " +
+                        "FROM cuentas_bancarias WHERE id = ? AND activa = 1",
+                    arrayOf(accountId.toString())
+                )
+                cursor.use {
+                    if (!it.moveToFirst()) error("La cuenta seleccionada ya no está disponible")
+                    accountName = it.getString(0)
+                    accountType = it.getString(1)
+                    currentBalance = it.getDouble(2)
+                    creditLimit = it.getDouble(3)
+                }
+                if (method == "tarjeta_credito" && accountType != "credito") {
+                    error("Selecciona una tarjeta de crédito registrada")
+                }
+                if (method == "banco" && accountType == "credito") {
+                    error("Para pagar con tarjeta, selecciona Tarjeta de crédito")
+                }
+                if (method == "tarjeta_credito" && creditLimit > 0 && kotlin.math.abs(currentBalance) + amount > creditLimit) {
+                    error("El gasto supera el crédito disponible de esta tarjeta")
+                }
+            }
+
             val values = ContentValues().apply {
                 put("tipo", movementType)
                 put("categoria", categoryField.selectedItem?.toString() ?: "Otro")
                 put("monto", amount)
                 put("descripcion", description)
                 put("fecha", SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date()))
-                put("medio_pago", "efectivo")
+                put("medio_pago", method)
+                if (accountId == null) putNull("cuenta_bancaria_id") else put("cuenta_bancaria_id", accountId)
             }
             database.beginTransaction()
             try {
-                database.insertOrThrow("movimientos", null, values)
+                val movementId = database.insertOrThrow("movimientos", null, values)
+                if (accountId != null && method == "banco") {
+                    val delta = if (movementType == "ingreso") amount else -amount
+                    database.execSQL(
+                        "UPDATE cuentas_bancarias SET saldo = COALESCE(saldo, 0) + ? WHERE id = ?",
+                        arrayOf(delta, accountId)
+                    )
+                } else if (accountId != null && method == "tarjeta_credito") {
+                    database.execSQL(
+                        "UPDATE cuentas_bancarias SET saldo = -ABS(COALESCE(saldo, 0)) - ? WHERE id = ?",
+                        arrayOf(amount, accountId)
+                    )
+                    val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+                    database.execSQL(
+                        "INSERT INTO creditos " +
+                            "(descripcion, banco, monto_total, meses_sin_intereses, cuota_mensual, " +
+                            "fecha_compra, tasa_interes, cuenta_bancaria_id, movimiento_id) " +
+                            "VALUES (?, ?, ?, 1, ?, ?, 0, ?, ?)",
+                        arrayOf(description, accountName, amount, amount, date, accountId, movementId)
+                    )
+                    val creditId = database.rawQuery("SELECT last_insert_rowid()", null).use {
+                        if (it.moveToFirst()) it.getLong(0) else error("No se pudo crear el registro de crédito")
+                    }
+                    database.execSQL(
+                        "UPDATE movimientos SET credito_id = ? WHERE id = ?",
+                        arrayOf(creditId, movementId)
+                    )
+                }
                 database.setTransactionSuccessful()
             } finally {
                 database.endTransaction()
             }
-            Toast.makeText(this, if (movementType == "ingreso") "Ingreso guardado" else "Gasto guardado", Toast.LENGTH_SHORT).show()
+            val paymentLabel = when (method) {
+                "banco" -> "en cuenta bancaria"
+                "tarjeta_credito" -> "en Créditos"
+                else -> "en efectivo"
+            }
+            Toast.makeText(
+                this,
+                "${if (movementType == "ingreso") "Ingreso" else "Gasto"} guardado $paymentLabel",
+                Toast.LENGTH_SHORT
+            ).show()
             finish()
         } catch (exception: Exception) {
             Toast.makeText(this, "No se pudo guardar: ${exception.localizedMessage}", Toast.LENGTH_LONG).show()
         } finally {
             database?.close()
         }
+    }
+
+    private fun openDatabase(): SQLiteDatabase {
+        // Serious Python ejecuta la app desde application-support/data;
+        // en Android ese directorio corresponde a filesDir/data.
+        val dataDirectory = File(filesDir, "data")
+        if (!dataDirectory.exists() && !dataDirectory.mkdirs()) {
+            error("No se pudo preparar el almacenamiento de la app")
+        }
+        val database = SQLiteDatabase.openOrCreateDatabase(File(dataDirectory, "finanzas.db"), null)
+        // PRAGMA devuelve una fila y debe ejecutarse con rawQuery, no execSQL.
+        database.rawQuery("PRAGMA busy_timeout=10000", null).use { it.moveToFirst() }
+        return database
     }
 
     private fun matchWrap() = LinearLayout.LayoutParams(
