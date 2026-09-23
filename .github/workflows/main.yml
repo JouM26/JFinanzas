@@ -33,6 +33,12 @@ jobs:
         # cambios incompatibles cuando el canal stable avance.
         flutter-version: '3.29.3'
 
+    # Los runners pueden traer el Android SDK instalado, pero sus licencias
+    # no siempre están aceptadas. Aceptarlas aquí evita que Gradle falle luego.
+    - name: Accept Android SDK licenses
+      run: |
+        python -c "import subprocess; p=subprocess.run(['flutter','doctor','--android-licenses'], input='y\\n'*100, text=True); raise SystemExit(p.returncode)"
+
     # 5. Instalar Flet y dependencias
     - name: Install Dependencies
       run: pip install -r requirements.txt
