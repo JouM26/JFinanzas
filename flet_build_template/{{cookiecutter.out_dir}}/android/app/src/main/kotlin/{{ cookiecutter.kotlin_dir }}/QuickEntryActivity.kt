@@ -82,6 +82,7 @@ class QuickEntryActivity : Activity() {
             adapter = ArrayAdapter(this@QuickEntryActivity, android.R.layout.simple_spinner_dropdown_item, CATEGORIES)
             if (isIncome) setSelection(CATEGORIES.indexOf("Salario"))
         }
+        root.addView(label("Categoría"), matchWrap())
         root.addView(categoryField, matchWrap())
 
         val paymentOptions = if (isIncome) {
@@ -92,9 +93,11 @@ class QuickEntryActivity : Activity() {
         paymentMethodField = Spinner(this).apply {
             adapter = ArrayAdapter(this@QuickEntryActivity, android.R.layout.simple_spinner_dropdown_item, paymentOptions)
         }
+        root.addView(label("Método de pago"), matchWrap())
         root.addView(paymentMethodField, matchWrap())
 
         accountField = Spinner(this)
+        root.addView(label("Cuenta"), matchWrap())
         root.addView(accountField, matchWrap())
         paymentMethodField.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
@@ -223,7 +226,7 @@ class QuickEntryActivity : Activity() {
             }
         } catch (exception: Exception) {
             accountIds = emptyList()
-            paymentNote.text = "No se pudieron cargar las cuentas: ${exception.localizedMessage}"
+            paymentNote.text = "No se pudieron cargar las cuentas. Abre la app y vuelve a intentarlo."
         }
     }
 
@@ -368,7 +371,37 @@ class QuickEntryActivity : Activity() {
         val database = SQLiteDatabase.openOrCreateDatabase(File(dataDirectory, "finanzas.db"), null)
         // PRAGMA devuelve una fila y debe ejecutarse con rawQuery, no execSQL.
         database.rawQuery("PRAGMA busy_timeout=10000", null).use { it.moveToFirst() }
+        database.execSQL(
+            "CREATE TABLE IF NOT EXISTS movimientos (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, tipo TEXT, categoria TEXT, " +
+                "monto REAL, descripcion TEXT, fecha TEXT, medio_pago TEXT DEFAULT 'efectivo', " +
+                "cuenta_bancaria_id INTEGER, credito_id INTEGER)"
+        )
+        database.execSQL(
+            "CREATE TABLE IF NOT EXISTS cuentas_bancarias (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, nombre_banco TEXT NOT NULL, " +
+                "tipo_cuenta TEXT NOT NULL, saldo REAL DEFAULT 0, limite_credito REAL DEFAULT 0, " +
+                "fecha_creacion TEXT, activa INTEGER DEFAULT 1)"
+        )
+        database.execSQL(
+            "CREATE TABLE IF NOT EXISTS creditos (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, descripcion TEXT NOT NULL, banco TEXT NOT NULL, " +
+                "monto_total REAL NOT NULL, meses_sin_intereses INTEGER NOT NULL, " +
+                "cuota_mensual REAL NOT NULL, meses_pagados INTEGER DEFAULT 0, fecha_compra TEXT, " +
+                "tasa_interes REAL DEFAULT 0, pagado INTEGER DEFAULT 0, " +
+                "cuenta_bancaria_id INTEGER, movimiento_id INTEGER)"
+        )
+        ensureMovementColumn(database, "medio_pago", "TEXT")
+        ensureMovementColumn(database, "cuenta_bancaria_id", "INTEGER")
+        ensureMovementColumn(database, "credito_id", "INTEGER")
         return database
+    }
+
+    private fun label(text: String) = TextView(this).apply {
+        this.text = text
+        textSize = 13f
+        setTextColor(Color.DKGRAY)
+        setPadding(0, dp(4), 0, 0)
     }
 
     private fun matchWrap() = LinearLayout.LayoutParams(

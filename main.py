@@ -3711,7 +3711,19 @@ def main(page: ft.Page):
     
     # Agregar contenedor de la app
     contenedor_app.content = contenedor_principal
-    
+
+    def actualizar_al_volver_a_la_app(e: ft.AppLifecycleStateChangeEvent):
+        # El widget Android guarda movimientos desde una Activity nativa. Al
+        # volver a Flet, reconstruimos la vista para leer los datos recientes.
+        if (
+            e.state == ft.AppLifecycleState.RESUME
+            and app_desbloqueada[0]
+            and not contenedor_onboarding.visible
+        ):
+            actualizar_vista()
+
+    page.on_app_lifecycle_state_change = actualizar_al_volver_a_la_app
+
     # Usar un Stack para manejar las vistas superpuestas
     main_stack = ft.Stack([
         contenedor_app,
