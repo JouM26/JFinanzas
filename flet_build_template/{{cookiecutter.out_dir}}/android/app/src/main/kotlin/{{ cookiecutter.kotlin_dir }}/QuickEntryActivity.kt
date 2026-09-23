@@ -69,7 +69,7 @@ class QuickEntryActivity : Activity() {
 
         descriptionField = EditText(this).apply {
             hint = "Descripción"
-            singleLine = true
+            isSingleLine = true
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         }
         root.addView(descriptionField, matchWrap())
@@ -81,7 +81,7 @@ class QuickEntryActivity : Activity() {
 
         amountField = EditText(this).apply {
             hint = "Monto"
-            singleLine = true
+            isSingleLine = true
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             addTextChangedListener(object : TextWatcher {
                 private var formatting = false
