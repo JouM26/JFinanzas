@@ -193,7 +193,7 @@ class QuickEntryActivity : Activity() {
             openDatabase().use { database ->
                 val cursor = database.rawQuery(
                     "SELECT id, nombre_banco, tipo_cuenta FROM cuentas_bancarias " +
-                        "WHERE activa = 1 ORDER BY nombre_banco",
+                        "WHERE COALESCE(activa, 1) = 1 ORDER BY nombre_banco",
                     null
                 )
                 cursor.use {
@@ -405,12 +405,26 @@ class QuickEntryActivity : Activity() {
     }
 
     private fun resolveDatabaseFile(): File {
-        val possibleFiles = listOf(
+        val possibleFiles = linkedSetOf(
             File(filesDir, "data/finanzas.db"),
             File(filesDir, "flet/py/data/finanzas.db"),
             File(filesDir, "flet/data/finanzas.db"),
             File(filesDir, "flet/py/finanzas.db")
         )
+        // El directorio de trabajo de Flet/Serious Python ha cambiado entre
+        // versiones. Busca la base real dentro del almacenamiento privado de
+        // esta instalación para evitar crear una base vacía paralela.
+        fun findDatabases(directory: File, depth: Int) {
+            if (depth <= 0) return
+            val children = try { directory.listFiles() } catch (_: Exception) { null } ?: return
+            for (child in children) {
+                if (child.isFile && child.name == "finanzas.db") possibleFiles.add(child)
+                else if (child.isDirectory && !child.name.startsWith(".") && child.name != "cache") {
+                    findDatabases(child, depth - 1)
+                }
+            }
+        }
+        findDatabases(filesDir, 7)
         val existing = possibleFiles.filter { it.isFile }.mapNotNull { file ->
             try {
                 val db = SQLiteDatabase.openDatabase(
@@ -432,6 +446,7 @@ class QuickEntryActivity : Activity() {
         return existing.maxWithOrNull(
             compareBy<Triple<File, Int, Int>> { it.second }
                 .thenBy { it.third }
+                .thenBy { it.first.length() }
                 .thenBy { it.first.lastModified() }
         )?.first ?: possibleFiles.first()
     }
