@@ -47,8 +47,13 @@ def main(page: ft.Page):
         return resultado
 
     def formatear_campo_importe(e):
-        # El valor se actualiza sin page.update para no interrumpir la escritura.
         e.control.value = formatear_texto_importe(e.control.value)
+        # Flet necesita enviar el valor reformateado al control para mostrar
+        # los separadores mientras se escribe.
+        try:
+            e.control.update()
+        except Exception:
+            page.update()
 
     # Configuración básica
     page.title = "Mis Finanzas"
@@ -89,6 +94,7 @@ def main(page: ft.Page):
     # Estado para navegación
     vista_actual = "inicio"
     app_desbloqueada = [False]  # Usar lista para poder modificar en funciones anidadas
+    ultima_transferencia = [None]
     
     # =====================================================
     # PANTALLA DE PIN / ONBOARDING
@@ -112,6 +118,34 @@ def main(page: ft.Page):
             on_change=lambda e, idx=i: manejar_pin_input(e, idx)
         ))
 
+    fila_pin_inputs = ft.Row(pin_inputs, alignment=ft.MainAxisAlignment.CENTER, spacing=10)
+    pin_pendiente = [None]
+    dropdown_pregunta_pin = ft.Dropdown(
+        label="Pregunta de seguridad",
+        options=[ft.dropdown.Option(q) for q in (
+            "¿Cuál era el nombre de tu primera mascota?",
+            "¿En qué ciudad naciste?",
+            "¿Cuál era el apodo de tu infancia?",
+            "¿Cuál es el segundo nombre de tu madre?",
+        )], width=300,
+    )
+    input_respuesta_pin = ft.TextField(label="Respuesta", width=300)
+    txt_pregunta_recuperacion = ft.Text("", size=16, text_align=ft.TextAlign.CENTER)
+    input_respuesta_recuperacion = ft.TextField(label="Respuesta de seguridad", width=300)
+    fila_pin_inputs.visible = True
+    bloque_pregunta_pin = ft.Column([
+        dropdown_pregunta_pin, input_respuesta_pin,
+        ft.ElevatedButton("Guardar PIN y pregunta", on_click=lambda e: guardar_pin_con_pregunta(e)),
+    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, visible=False)
+    bloque_recuperacion_pin = ft.Column([
+        txt_pregunta_recuperacion, input_respuesta_recuperacion,
+        ft.ElevatedButton("Verificar respuesta", on_click=lambda e: verificar_recuperacion_pin(e)),
+        ft.TextButton("Restaurar respaldo JSON", on_click=lambda e: picker_recuperar_pin.pick_files(
+            allowed_extensions=["json"], dialog_title="Selecciona tu respaldo JSON",
+            file_type=ft.FilePickerFileType.CUSTOM,
+        )),
+    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, visible=False)
+
     input_pin_actual_cambio = ft.TextField(
         label="PIN actual", password=True, can_reveal_password=True,
         keyboard_type=ft.KeyboardType.NUMBER, max_length=4, width=260,
@@ -119,6 +153,19 @@ def main(page: ft.Page):
     input_pin_nuevo_cambio = ft.TextField(
         label="PIN nuevo (4 dígitos)", password=True, can_reveal_password=True,
         keyboard_type=ft.KeyboardType.NUMBER, max_length=4, width=260,
+    )
+    dropdown_pregunta_cambio_pin = ft.Dropdown(
+        label="Pregunta de recuperación",
+        options=[ft.dropdown.Option(q) for q in (
+            "¿Cuál era el nombre de tu primera mascota?",
+            "¿En qué ciudad naciste?",
+            "¿Cuál era el apodo de tu infancia?",
+            "¿Cuál es el segundo nombre de tu madre?",
+        )], width=300, visible=not db.tiene_pregunta_seguridad(),
+    )
+    input_respuesta_cambio_pin = ft.TextField(
+        label="Respuesta de recuperación", width=300,
+        visible=not db.tiene_pregunta_seguridad(),
     )
 
     def confirmar_cambio_pin(e):
@@ -132,14 +179,19 @@ def main(page: ft.Page):
             input_pin_actual_cambio.error_text = "PIN actual incorrecto."
         elif len(pin_nuevo) != 4 or not pin_nuevo.isdigit():
             input_pin_nuevo_cambio.error_text = "El nuevo PIN debe tener 4 dígitos."
-        elif not db.guardar_pin(pin_nuevo):
+        elif not db.tiene_pregunta_seguridad() and (
+            not dropdown_pregunta_cambio_pin.value or not (input_respuesta_cambio_pin.value or "").strip()
+        ):
+            dropdown_pregunta_cambio_pin.error_text = "Elige una pregunta de recuperación."
+            input_respuesta_cambio_pin.error_text = "Ingresa la respuesta."
+        elif not (
+            db.guardar_pin_y_pregunta(pin_nuevo, dropdown_pregunta_cambio_pin.value, input_respuesta_cambio_pin.value)
+            if not db.tiene_pregunta_seguridad() else db.guardar_pin(pin_nuevo)
+        ):
             input_pin_nuevo_cambio.error_text = "No se pudo guardar el nuevo PIN."
         else:
             bottom_sheet_cambiar_pin.open = False
-            page.show_snack_bar(ft.SnackBar(
-                content=ft.Text("✅ PIN cambiado correctamente."),
-                bgcolor=colores["verde"],
-            ))
+            page.show_snack_bar(ft.SnackBar(content=ft.Text("✅ PIN cambiado correctamente."), bgcolor=colores["verde"], duration=6000))
         page.update()
     
     txt_pin_mensaje = ft.Text("", color="red", size=14, text_align=ft.TextAlign.CENTER)
@@ -167,26 +219,72 @@ def main(page: ft.Page):
                 limpiar_pin()
                 page.update()
         else:
-            # Es nuevo, guardar PIN
+            # Es nuevo: pedir que configure su pregunta de recuperación.
             guardar_nuevo_pin(pin)
     
     def guardar_nuevo_pin(pin):
-        """Guarda un nuevo PIN"""
+        """Solicita pregunta de seguridad antes de guardar el PIN inicial."""
         if len(pin) != 4 or not pin.isdigit():
             txt_pin_mensaje.value = "El PIN debe tener 4 dígitos numéricos."
             limpiar_pin()
             page.update()
             return
 
-        if db.guardar_pin(pin):
-            txt_pin_mensaje.value = "✅ PIN creado correctamente"
+        pin_pendiente[0] = pin
+        fila_pin_inputs.visible = False
+        bloque_pregunta_pin.visible = True
+        txt_pin_titulo.value = "Configura recuperación del PIN"
+        txt_pin_instruccion.value = "Elige una pregunta y recuerda la respuesta; la necesitarás si olvidas el PIN."
+        txt_pin_mensaje.value = ""
+        page.update()
+
+    def guardar_pin_con_pregunta(e):
+        if not pin_pendiente[0]:
+            return
+        if not dropdown_pregunta_pin.value or not (input_respuesta_pin.value or "").strip():
+            txt_pin_mensaje.value = "Selecciona una pregunta e ingresa su respuesta."
             page.update()
-            import time
-            time.sleep(0.5)
+            return
+        if db.guardar_pin_y_pregunta(pin_pendiente[0], dropdown_pregunta_pin.value, input_respuesta_pin.value):
+            pin_pendiente[0] = None
+            bloque_pregunta_pin.visible = False
+            txt_pin_mensaje.value = "✅ PIN y pregunta de recuperación guardados."
             desbloquear_app()
         else:
-            txt_pin_mensaje.value = "No se pudo guardar el PIN. Inténtalo de nuevo."
-            limpiar_pin()
+            txt_pin_mensaje.value = "No se pudo guardar. Revisa los datos e inténtalo de nuevo."
+            page.update()
+
+    def iniciar_recuperacion_pin(e):
+        if db.tiene_pregunta_seguridad():
+            txt_pregunta_recuperacion.value = db.obtener_pregunta_seguridad() or ""
+            fila_pin_inputs.visible = False
+            bloque_pregunta_pin.visible = False
+            bloque_recuperacion_pin.visible = True
+            txt_pin_mensaje.value = ""
+            txt_pin_titulo.value = "Recuperar PIN"
+            txt_pin_instruccion.value = "Responde tu pregunta de seguridad para crear uno nuevo."
+            input_respuesta_recuperacion.value = ""
+            page.update()
+        else:
+            picker_recuperar_pin.pick_files(allowed_extensions=["json"], dialog_title="Selecciona tu respaldo JSON", file_type=ft.FilePickerFileType.CUSTOM)
+
+    def verificar_recuperacion_pin(e):
+        pregunta = db.obtener_pregunta_seguridad()
+        if db.verificar_respuesta_seguridad(pregunta, input_respuesta_recuperacion.value):
+            if db.borrar_pin():
+                bloque_recuperacion_pin.visible = False
+                fila_pin_inputs.visible = True
+                btn_recuperar_pin.visible = False
+                btn_saltar_pin.visible = False
+                txt_pin_titulo.value = "Crea un nuevo PIN"
+                txt_pin_instruccion.value = "Respuesta correcta. Ingresa un nuevo PIN de 4 dígitos."
+                txt_pin_mensaje.value = "✅ Respuesta verificada. Configura tu nuevo PIN y pregunta."
+                limpiar_pin()
+            else:
+                txt_pin_mensaje.value = "No se pudo restablecer el PIN."
+            page.update()
+        else:
+            txt_pin_mensaje.value = "Respuesta incorrecta. Inténtalo nuevamente o restaura un respaldo."
             page.update()
     
     def limpiar_pin():
@@ -221,6 +319,9 @@ def main(page: ft.Page):
             if not db.borrar_pin():
                 raise ValueError("No se pudo reiniciar el PIN.")
             db.completar_onboarding()
+            bloque_recuperacion_pin.visible = False
+            bloque_pregunta_pin.visible = False
+            fila_pin_inputs.visible = True
             txt_pin_titulo.value = "Crea un nuevo PIN"
             txt_pin_instruccion.value = "Respaldo restaurado. Ingresa un PIN nuevo de 4 dígitos."
             txt_pin_mensaje.value = ""
@@ -251,11 +352,7 @@ def main(page: ft.Page):
 
     btn_recuperar_pin = ft.TextButton(
         "Restaurar respaldo o recuperar PIN",
-        on_click=lambda e: picker_recuperar_pin.pick_files(
-            allowed_extensions=["json"],
-            dialog_title="Selecciona tu respaldo JSON",
-            file_type=ft.FilePickerFileType.CUSTOM,
-        ),
+        on_click=iniciar_recuperacion_pin,
         visible=True,
     )
     
@@ -2461,6 +2558,8 @@ def main(page: ft.Page):
                 ft.Text("🔐 Cambiar PIN de seguridad", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                 input_pin_actual_cambio,
                 input_pin_nuevo_cambio,
+                dropdown_pregunta_cambio_pin,
+                input_respuesta_cambio_pin,
                 ft.ElevatedButton("Confirmar cambio", on_click=confirmar_cambio_pin, width=float("inf")),
             ], tight=True, spacing=15, scroll=ft.ScrollMode.AUTO),
             padding=20,
@@ -3284,8 +3383,9 @@ def main(page: ft.Page):
                 nombre_destino = next((c[1] for c in cuentas if c[0] == cuenta_destino_id), "destino")
 
                 if db.realizar_transferencia(cuenta_origen_id, cuenta_destino_id, monto):
+                    ultima_transferencia[0] = (monto, nombre_origen, nombre_destino, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
                     page.show_snack_bar(
-                        ft.SnackBar(content=ft.Text(f"✅ ${monto:,.0f} transferidos: {nombre_origen} → {nombre_destino}"), bgcolor=colores["verde"])
+                        ft.SnackBar(content=ft.Text(f"✅ Transferencia realizada: ${monto:,.0f} · {nombre_origen} → {nombre_destino}"), bgcolor=colores["verde"], duration=7000)
                     )
                     dropdown_origen.value = None
                     dropdown_destino.value = None
@@ -3320,6 +3420,20 @@ def main(page: ft.Page):
         
         # Historial de transferencias
         lista_trans = ft.ListView(spacing=10, padding=10, expand=True)
+        confirmacion_transferencia = None
+        if ultima_transferencia[0]:
+            monto_ok, origen_ok, destino_ok, fecha_ok = ultima_transferencia[0]
+            confirmacion_transferencia = ft.Container(
+                content=ft.Row([
+                    ft.Icon("check_circle", color=colores["verde"], size=28),
+                    ft.Column([
+                        ft.Text("Transferencia realizada", weight=ft.FontWeight.BOLD, color=colores["verde"]),
+                        ft.Text(f"${monto_ok:,.0f} · {origen_ok} → {destino_ok} · {fecha_ok}", color=colores["texto"]),
+                    ], spacing=3, expand=True),
+                ]),
+                padding=14, margin=ft.padding.symmetric(horizontal=12, vertical=4),
+                bgcolor=colores["tarjeta"], border=ft.border.all(1, colores["verde"]), border_radius=12,
+            )
         
         if not transferencias:
             lista_trans.controls.append(
@@ -3351,6 +3465,7 @@ def main(page: ft.Page):
         
         return ft.Column([
             header,
+            *([confirmacion_transferencia] if confirmacion_transferencia else []),
             ft.Container(
                 content=ft.Text("📜 Historial de Transferencias", size=16, weight=ft.FontWeight.BOLD, color=colores["texto"]),
                 padding=ft.padding.only(left=15, top=10)
@@ -3569,7 +3684,9 @@ def main(page: ft.Page):
             txt_pin_titulo,
             txt_pin_instruccion,
             ft.Container(height=30),
-            ft.Row(pin_inputs, alignment=ft.MainAxisAlignment.CENTER, spacing=10),
+            fila_pin_inputs,
+            bloque_pregunta_pin,
+            bloque_recuperacion_pin,
             ft.Container(height=10),
             txt_pin_mensaje,
             ft.Container(height=30),

@@ -223,6 +223,60 @@ class Database:
             self.conn.rollback()
             print(f"Error al borrar PIN: {e}")
             return False
+
+    @staticmethod
+    def _normalizar_respuesta_seguridad(respuesta):
+        return " ".join((respuesta or "").strip().casefold().split())
+
+    def guardar_pin_y_pregunta(self, pin, pregunta, respuesta):
+        """Guarda PIN y recuperación en una transacción, sin guardar la respuesta legible."""
+        if len(pin) != 4 or not pin.isdigit() or not pregunta or not self._normalizar_respuesta_seguridad(respuesta):
+            return False
+        try:
+            iteraciones = 310000
+            sal_pin = secrets.token_bytes(16)
+            sal_respuesta = secrets.token_bytes(16)
+            hash_pin = hashlib.pbkdf2_hmac("sha256", pin.encode(), sal_pin, iteraciones).hex()
+            respuesta_normalizada = self._normalizar_respuesta_seguridad(respuesta)
+            hash_respuesta = hashlib.pbkdf2_hmac("sha256", respuesta_normalizada.encode(), sal_respuesta, iteraciones).hex()
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            configuracion = {
+                "pin_hash": f"pbkdf2_sha256${iteraciones}${sal_pin.hex()}${hash_pin}",
+                "pregunta_pin": pregunta,
+                "respuesta_pin_hash": f"pbkdf2_sha256${iteraciones}${sal_respuesta.hex()}${hash_respuesta}",
+                "pin_intentos": "0",
+                "pin_bloqueado_hasta": "0",
+            }
+            for clave, valor in configuracion.items():
+                cursor.execute("INSERT OR REPLACE INTO configuracion (clave, valor) VALUES (?, ?)", (clave, valor))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error al guardar PIN y pregunta: {e}")
+            return False
+
+    def tiene_pregunta_seguridad(self):
+        return bool(self.obtener_config("pregunta_pin") and self.obtener_config("respuesta_pin_hash"))
+
+    def obtener_pregunta_seguridad(self):
+        return self.obtener_config("pregunta_pin")
+
+    def verificar_respuesta_seguridad(self, pregunta, respuesta):
+        pregunta_guardada = self.obtener_config("pregunta_pin")
+        respuesta_guardada = self.obtener_config("respuesta_pin_hash")
+        if not pregunta_guardada or not respuesta_guardada or pregunta != pregunta_guardada:
+            return False
+        try:
+            _, iteraciones, sal, hash_guardado = respuesta_guardada.split("$", 3)
+            respuesta = self._normalizar_respuesta_seguridad(respuesta)
+            hash_calculado = hashlib.pbkdf2_hmac(
+                "sha256", respuesta.encode(), bytes.fromhex(sal), int(iteraciones)
+            ).hex()
+            return hmac.compare_digest(hash_calculado, hash_guardado)
+        except Exception:
+            return False
     
     def es_primera_vez(self):
         return self.obtener_config("onboarding_completado") != "1"

@@ -5,20 +5,20 @@ import platform
 import datetime
 import json
 import unicodedata
+import importlib.util
+import sys
 
-# Importar openpyxl solo si está disponible (no funciona en Android)
-EXCEL_DISPONIBLE = False
-Workbook = None
-Font = None
-PatternFill = None
-Alignment = None
-
+# Detectar la disponibilidad sin importar la librería completa. La importación
+# real se hace únicamente al exportar a Excel, para reducir el arranque en PC.
+_ES_ANDROID = (
+    hasattr(sys, "getandroidapilevel")
+    or bool(os.environ.get("ANDROID_ROOT"))
+    or bool(os.environ.get("ANDROID_DATA"))
+)
 try:
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
-    EXCEL_DISPONIBLE = True
-except:
-    pass
+    EXCEL_DISPONIBLE = not _ES_ANDROID and importlib.util.find_spec("openpyxl") is not None
+except (ImportError, ValueError):
+    EXCEL_DISPONIBLE = False
 
 
 def crear_pdf_respaldo(datos_json):
@@ -90,9 +90,10 @@ def get_persistent_db_path():
     Esta ruta NO se elimina cuando se actualiza la app.
     """
     try:
-        # En Android, usar directorio actual
+        # Serious Python establece el directorio actual en application-support/data.
+        # El widget nativo usa el mismo directorio: filesDir/data.
         if es_android():
-            return "finanzas.db"
+            return str(pathlib.Path.cwd() / "finanzas.db")
         
         sistema = platform.system().lower()
         
@@ -180,6 +181,9 @@ def exportar_movimientos_a_excel(db, mes, anio):
         return False, "Exportación Excel no disponible en este dispositivo"
     
     try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+
         movimientos = db.obtener_movimientos_mensuales(mes, anio)
         ingresos_mes, gastos_mes = db.obtener_balance_mensual(mes, anio)
         total_subs = db.obtener_total_suscripciones()
