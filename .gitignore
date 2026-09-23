@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Keep the Flutter bootstrap template's Dart sources in Git. The generic
+# Python `lib/` and `*.manifest` ignores above otherwise remove template files.
+!flet_build_template/**/lib/
+!flet_build_template/**/lib/**
+!flet_build_template/**/*.manifest
