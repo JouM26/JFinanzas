@@ -41,10 +41,12 @@ const bool isProduction = bool.fromEnvironment('dart.vm.product');
 
 const assetPath = "app/app.zip";
 const pythonModuleName = "{{ cookiecutter.python_module_name }}";
-final showAppBootScreen = bool.tryParse("{{ show_boot_screen }}".toLowerCase()) ?? false;
-const appBootScreenMessage = '{{ boot_screen_message | default("Preparing the app for its first launch…", true) }}';
-final showAppStartupScreen = bool.tryParse("{{ show_startup_screen }}".toLowerCase()) ?? false;
-const appStartupScreenMessage = '{{ startup_screen_message | default("Getting things ready…", true) }}';
+// Mostrar una pantalla de carga legible mientras se extraen los recursos de
+// Python y se conecta Flet. La pantalla vacía anterior parecía un bloqueo.
+final showAppBootScreen = bool.tryParse("{{ show_boot_screen }}".toLowerCase()) ?? true;
+const appBootScreenMessage = '{{ boot_screen_message | default("Preparando la aplicación…", true) }}';
+final showAppStartupScreen = bool.tryParse("{{ show_startup_screen }}".toLowerCase()) ?? true;
+const appStartupScreenMessage = '{{ startup_screen_message | default("Cargando tus finanzas…", true) }}';
 
 List<CreateControlFactory> createControlFactories = [
 {% for dep in cookiecutter.flutter.dependencies %}
@@ -324,20 +326,39 @@ class BootScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFF0D1117),
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const SizedBox(
-              width: 30,
-              height: 30,
-              child: CircularProgressIndicator(strokeWidth: 3),
-            ),
-            const SizedBox(
-              height: 10,
-            ),
-            Text(appBootScreenMessage, style: Theme.of(context).textTheme.bodySmall,)
-          ],
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 28),
+          decoration: BoxDecoration(
+            color: const Color(0xFF161B22),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: const Color(0xFF30363D)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.account_balance_wallet_rounded,
+                  size: 42, color: Color(0xFF58A6FF)),
+              const SizedBox(height: 12),
+              const Text('Mis Finanzas',
+                  style: TextStyle(
+                      color: Color(0xFFE6EDF3),
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 22),
+              const SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(
+                    strokeWidth: 3, color: Color(0xFF58A6FF)),
+              ),
+              const SizedBox(height: 14),
+              Text(appBootScreenMessage,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Color(0xFF8B949E))),
+            ],
+          ),
         ),
       ),
     );

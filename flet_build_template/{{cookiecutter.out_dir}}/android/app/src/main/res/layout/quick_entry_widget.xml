@@ -4,34 +4,31 @@
     android:layout_height="match_parent"
     android:orientation="horizontal"
     android:gravity="center"
-    android:padding="3dp"
-    android:background="@android:color/transparent">
+    android:padding="8dp"
+    android:background="@drawable/finance_summary_widget_background">
 
-    <Button
+    <TextView
         android:id="@+id/widget_income"
-        android:layout_width="0dp"
-        android:layout_height="match_parent"
-        android:layout_weight="1"
-        android:layout_marginEnd="2dp"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_marginEnd="10dp"
         android:background="@drawable/widget_income_background"
         android:contentDescription="Agregar ingreso"
+        android:gravity="center"
         android:text="+"
-        android:textAllCaps="false"
         android:textColor="#FFFFFFFF"
-        android:textSize="24sp"
+        android:textSize="27sp"
         android:textStyle="bold" />
 
-    <Button
+    <TextView
         android:id="@+id/widget_expense"
-        android:layout_width="0dp"
-        android:layout_height="match_parent"
-        android:layout_weight="1"
-        android:layout_marginStart="2dp"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
         android:background="@drawable/widget_expense_background"
         android:contentDescription="Agregar gasto"
+        android:gravity="center"
         android:text="-"
-        android:textAllCaps="false"
         android:textColor="#FFFFFFFF"
-        android:textSize="24sp"
+        android:textSize="27sp"
         android:textStyle="bold" />
 </LinearLayout>

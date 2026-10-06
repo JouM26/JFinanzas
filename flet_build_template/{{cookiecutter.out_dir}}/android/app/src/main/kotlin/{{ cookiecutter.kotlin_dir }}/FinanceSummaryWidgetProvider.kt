@@ -11,10 +11,13 @@ import android.widget.RemoteViews
 import java.io.File
 import java.text.NumberFormat
 import java.util.Locale
+import java.util.concurrent.Executors
 
 /** Widget de consulta rápida: gasto diario, semanal, mensual y ahorro acumulado. */
 class FinanceSummaryWidgetProvider : AppWidgetProvider() {
     companion object {
+        private val refreshExecutor = Executors.newSingleThreadExecutor()
+
         fun requestRefresh(context: Context) {
             val manager = AppWidgetManager.getInstance(context)
             val component = ComponentName(context, FinanceSummaryWidgetProvider::class.java)
@@ -32,6 +35,21 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
         manager: AppWidgetManager,
         appWidgetIds: IntArray
     ) {
+        // Leer SQLite y buscar la ruta de datos puede tardar. No bloquear el
+        // hilo principal del proceso, especialmente durante el arranque.
+        val pendingResult = goAsync()
+        refreshExecutor.execute {
+            try {
+                updateWidgets(context.applicationContext, manager, appWidgetIds)
+            } catch (_: Exception) {
+                // Un widget sin datos no debe tumbar el proceso de la aplicación.
+            } finally {
+                pendingResult.finish()
+            }
+        }
+    }
+
+    private fun updateWidgets(context: Context, manager: AppWidgetManager, appWidgetIds: IntArray) {
         val totals = loadTotals(context)
         val money = NumberFormat.getNumberInstance(Locale.US).apply { maximumFractionDigits = 0 }
         appWidgetIds.forEach { id ->
