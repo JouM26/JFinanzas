@@ -358,6 +358,7 @@ class QuickEntryActivity : Activity() {
                 "${if (movementType == "ingreso") "Ingreso" else "Gasto"} guardado $paymentLabel",
                 Toast.LENGTH_SHORT
             ).show()
+            FinanceSummaryWidgetProvider.requestRefresh(this)
             finish()
         } catch (exception: Exception) {
             Toast.makeText(this, "No se pudo guardar: ${exception.localizedMessage}", Toast.LENGTH_LONG).show()

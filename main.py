@@ -6,6 +6,7 @@ import os
 from database import Database
 from utils import (
     get_persistent_db_path,
+    es_android,
     obtener_colores,
     EXCEL_DISPONIBLE,
     CATEGORIAS,
@@ -114,6 +115,10 @@ def main(page: ft.Page):
             max_length=1,
             text_size=24,
             border_radius=10,
+            color=colores["texto"],
+            bgcolor=colores["tarjeta"],
+            border_color=colores["borde"],
+            focused_border_color=colores["azul"],
             password=True,
             on_change=lambda e, idx=i: manejar_pin_input(e, idx)
         ))
@@ -266,7 +271,12 @@ def main(page: ft.Page):
             input_respuesta_recuperacion.value = ""
             page.update()
         else:
-            picker_recuperar_pin.pick_files(allowed_extensions=["json"], dialog_title="Selecciona tu respaldo JSON", file_type=ft.FilePickerFileType.CUSTOM)
+            picker_recuperar_pin.pick_files(
+                allowed_extensions=["json"],
+                dialog_title="Selecciona tu respaldo JSON",
+                file_type=ft.FilePickerFileType.CUSTOM,
+                with_data=True,
+            )
 
     def verificar_recuperacion_pin(e):
         pregunta = db.obtener_pregunta_seguridad()
@@ -312,8 +322,15 @@ def main(page: ft.Page):
         if not e.files:
             return
         try:
-            with open(e.files[0].path, "r", encoding="utf-8") as archivo:
-                respaldo = archivo.read()
+            seleccionado = e.files[0]
+            contenido = getattr(seleccionado, "bytes", None)
+            if contenido is not None:
+                respaldo = contenido.decode("utf-8-sig") if isinstance(contenido, bytes) else str(contenido)
+            elif seleccionado.path:
+                with open(seleccionado.path, "r", encoding="utf-8-sig") as archivo:
+                    respaldo = archivo.read()
+            else:
+                raise ValueError("El selector no entregó acceso al archivo. Intenta elegir el JSON nuevamente.")
             if not db.importar_datos(respaldo):
                 raise ValueError("El archivo no es un respaldo válido de Mis Finanzas.")
             if not db.borrar_pin():
@@ -520,6 +537,13 @@ def main(page: ft.Page):
         ],
         value="Comida"
     )
+
+    categorias_base = ["Comida", "Transporte", "Servicios", "Ocio", "Salud", "Salario", "Compras", "Educación", "Otro"]
+
+    def opciones_categoria(tipo_movimiento):
+        permitidas = [categoria for categoria in categorias_base if tipo_movimiento == "ingreso" or categoria != "Salario"]
+        personalizadas = [nombre for nombre, tipo_categoria in db.obtener_categorias_personalizadas(tipo_movimiento)]
+        return [ft.dropdown.Option(categoria) for categoria in dict.fromkeys(permitidas + personalizadas)]
     dropdown_destino_movimiento = ft.Dropdown(
         label="Método de pago",
         options=[
@@ -540,6 +564,11 @@ def main(page: ft.Page):
     def actualizar_opciones_destino():
         """Actualiza las etiquetas y opciones según el tipo de movimiento"""
         es_ingreso = dropdown_tipo.value == "ingreso"
+
+        dropdown_cat.options = opciones_categoria(dropdown_tipo.value or "gasto")
+        valores_categoria = {opcion.key for opcion in dropdown_cat.options}
+        if dropdown_cat.value not in valores_categoria:
+            dropdown_cat.value = "Salario" if es_ingreso else "Comida"
 
         dropdown_destino_movimiento.label = "Destino del ingreso" if es_ingreso else "Método de pago"
         opciones_destino = [
@@ -628,6 +657,66 @@ def main(page: ft.Page):
         dialogo_confirmacion.actions[1].on_click = lambda e: ejecutar_borrado(tipo, id_registro)
         dialogo_confirmacion.open = True
         page.update()
+
+    respaldo_pendiente_importar = [None]
+    aviso_restauracion = ft.Text(
+        "Al confirmar, los registros actuales se reemplazarán por los del respaldo.",
+        color=colores["texto_secundario"],
+    )
+    campo_respaldo_pegado = ft.TextField(
+        label="Pega aquí el contenido JSON",
+        multiline=True,
+        min_lines=5,
+        max_lines=9,
+        visible=False,
+        text_size=12,
+    )
+
+    def ejecutar_restauracion_respaldo(e):
+        contenido = respaldo_pendiente_importar[0]
+        if contenido is None:
+            contenido = campo_respaldo_pegado.value
+        if not contenido or not db.importar_datos(contenido):
+            page.show_snack_bar(ft.SnackBar(
+                content=ft.Text("No se pudo restaurar. El archivo no es un respaldo JSON válido."),
+                bgcolor=colores["rojo"], duration=6000,
+            ))
+            return
+        respaldo_pendiente_importar[0] = None
+        campo_respaldo_pegado.value = ""
+        campo_respaldo_pegado.visible = False
+        dialogo_restauracion.open = False
+        page.show_snack_bar(ft.SnackBar(
+            content=ft.Text("✅ Respaldo restaurado correctamente."),
+            bgcolor=colores["verde"], duration=5000,
+        ))
+        actualizar_vista()
+
+    dialogo_restauracion = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Confirmar restauración"),
+        content=ft.Column([aviso_restauracion, campo_respaldo_pegado], tight=True, scroll=ft.ScrollMode.AUTO),
+        actions=[
+            ft.TextButton("Cancelar", on_click=lambda e: (setattr(dialogo_restauracion, "open", False), page.update())),
+            ft.ElevatedButton("Restaurar", bgcolor=colores["verde"], color="white", on_click=ejecutar_restauracion_respaldo),
+        ],
+        actions_alignment=ft.MainAxisAlignment.END,
+    )
+
+    def pedir_confirmacion_restauracion(contenido):
+        respaldo_pendiente_importar[0] = contenido
+        campo_respaldo_pegado.visible = False
+        aviso_restauracion.value = "Al confirmar, los registros actuales se reemplazarán por los del respaldo."
+        dialogo_restauracion.open = True
+        page.update()
+
+    def abrir_restauracion_pegada(e):
+        respaldo_pendiente_importar[0] = None
+        campo_respaldo_pegado.value = ""
+        campo_respaldo_pegado.visible = True
+        aviso_restauracion.value = "Pega el texto JSON copiado desde Exportar respaldo. Al confirmar se reemplazarán los datos actuales."
+        dialogo_restauracion.open = True
+        page.update()
     
     def ejecutar_borrado(tipo, id_registro):
         """Ejecuta el borrado después de confirmación"""
@@ -670,7 +759,8 @@ def main(page: ft.Page):
             ft.dropdown.Option("Servicios"), ft.dropdown.Option("Ocio"),
             ft.dropdown.Option("Salud"), ft.dropdown.Option("Salario"),
             ft.dropdown.Option("Compras"), ft.dropdown.Option("Educación"),
-            ft.dropdown.Option("Otro")
+            ft.dropdown.Option("Otro"),
+            *[ft.dropdown.Option(nombre) for nombre, _ in db.obtener_categorias_personalizadas()]
         ],
         value="",
         on_change=lambda e: aplicar_filtros()
@@ -2987,11 +3077,17 @@ def main(page: ft.Page):
             page.bgcolor = colores_actuales["fondo"]
             page.appbar.bgcolor = colores_actuales["appbar"]
             page.navigation_bar.bgcolor = colores_actuales["tarjeta"]
-            page.floating_action_button.bgcolor = colores_actuales["appbar"]
+            page.floating_action_button.bgcolor = colores_actuales["azul"]
+            page.floating_action_button.icon_color = "white"
             for campo in campos_texto_app:
                 campo.color = colores_actuales["texto"]
                 campo.bgcolor = colores_actuales["input_bg"]
                 campo.border_color = colores_actuales["input_border"]
+            for campo_pin in pin_inputs:
+                campo_pin.color = colores_actuales["texto"]
+                campo_pin.bgcolor = colores_actuales["tarjeta"]
+                campo_pin.border_color = colores_actuales["borde"]
+                campo_pin.focused_border_color = colores_actuales["azul"]
             page.update()
             actualizar_vista()
         
@@ -3009,6 +3105,13 @@ def main(page: ft.Page):
             try:
                 datos = db.exportar_datos()
                 if datos:
+                    if es_android():
+                        page.set_clipboard(datos)
+                        page.show_snack_bar(ft.SnackBar(
+                            content=ft.Text("Respaldo JSON copiado. Pégalo en una nota o archivo .json y guárdalo fuera del teléfono."),
+                            bgcolor=colores["verde"], duration=7000,
+                        ))
+                        return
                     nombre_archivo = f"JFinanzas_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                     json_respaldo_pendiente[0] = datos
                     json_picker.save_file(file_name=nombre_archivo, dialog_title="Guardar respaldo JSON", allowed_extensions=["json"])
@@ -3020,6 +3123,21 @@ def main(page: ft.Page):
                 page.show_snack_bar(
                     ft.SnackBar(content=ft.Text(f"❌ Error: {ex}"), bgcolor=colores["rojo"])
                 )
+
+        def copiar_backup_json(e):
+            try:
+                datos = db.exportar_datos()
+                if not datos:
+                    raise ValueError("No se pudieron leer los datos para el respaldo.")
+                page.set_clipboard(datos)
+                page.show_snack_bar(ft.SnackBar(
+                    content=ft.Text("✅ Respaldo JSON copiado. Pégalo en una nota o archivo .json para conservarlo."),
+                    bgcolor=colores["verde"], duration=6000,
+                ))
+            except Exception as ex:
+                page.show_snack_bar(ft.SnackBar(
+                    content=ft.Text(f"No se pudo copiar el respaldo: {ex}"), bgcolor=colores["rojo"]
+                ))
 
         pdf_respaldo_pendiente = [None]
         json_respaldo_pendiente = [None]
@@ -3069,22 +3187,16 @@ def main(page: ft.Page):
             if e.files and len(e.files) > 0:
                 archivo = e.files[0]
                 try:
-                    with open(archivo.path, 'r', encoding='utf-8') as f:
-                        json_data = f.read()
-                    
-                    if db.importar_datos(json_data):
-                        page.show_snack_bar(
-                            ft.SnackBar(
-                                content=ft.Text("✅ Datos importados correctamente. Reinicia la app para ver los cambios."),
-                                bgcolor=colores["verde"],
-                                duration=5000
-                            )
-                        )
-                        actualizar_vista()
+                    contenido = getattr(archivo, "bytes", None)
+                    if contenido is not None:
+                        json_data = contenido.decode("utf-8-sig") if isinstance(contenido, bytes) else str(contenido)
+                    elif archivo.path:
+                        with open(archivo.path, "r", encoding="utf-8-sig") as f:
+                            json_data = f.read()
                     else:
-                        page.show_snack_bar(
-                            ft.SnackBar(content=ft.Text("❌ Error al importar datos"), bgcolor=colores["rojo"])
-                        )
+                        raise ValueError("El selector no entregó acceso al archivo. Intenta elegir el JSON nuevamente.")
+                    
+                    pedir_confirmacion_restauracion(json_data)
                 except Exception as ex:
                     page.show_snack_bar(
                         ft.SnackBar(content=ft.Text(f"❌ Error: {ex}"), bgcolor=colores["rojo"])
@@ -3096,10 +3208,11 @@ def main(page: ft.Page):
         def importar_backup(e):
             """Abre el selector de archivos para importar"""
             file_picker.pick_files(
-                allowed_extensions=["json"],
-                dialog_title="Selecciona el archivo de backup",
-                file_type=ft.FilePickerFileType.CUSTOM
-            )
+                    allowed_extensions=["json"],
+                    dialog_title="Selecciona el archivo de backup",
+                    file_type=ft.FilePickerFileType.CUSTOM,
+                    with_data=True,
+                )
         
         return ft.Column([
             ft.Container(
@@ -3158,9 +3271,10 @@ def main(page: ft.Page):
                             ft.Icon("backup", color=colores["verde"]),
                             ft.Column([
                                 ft.Text("Exportar Backup", weight=ft.FontWeight.BOLD, color=colores["texto"]),
-                                ft.Text("Respaldo para reinstalar o recuperar tu PIN", size=12, color=colores["texto_secundario"]),
+                                ft.Text("Guárdalo fuera del teléfono para reinstalar o recuperar el PIN", size=12, color=colores["texto_secundario"]),
                             ], expand=True, spacing=2),
-                            ft.IconButton(icon="download", on_click=exportar_backup, icon_color=colores["texto"])
+                            ft.IconButton(icon="content_copy", tooltip="Copiar respaldo JSON", on_click=copiar_backup_json, icon_color=colores["texto"]),
+                            ft.IconButton(icon="download", tooltip="Guardar respaldo JSON", on_click=exportar_backup, icon_color=colores["texto"])
                         ]),
                         padding=15,
                         bgcolor=colores["verde_bg"],
@@ -3174,9 +3288,10 @@ def main(page: ft.Page):
                             ft.Icon("cloud_upload", color=colores["cyan"]),
                             ft.Column([
                                 ft.Text("Importar Backup", weight=ft.FontWeight.BOLD, color=colores["texto"]),
-                                ft.Text("Restaura datos desde archivo JSON", size=12, color=colores["texto_secundario"]),
+                                ft.Text("Restaura desde un archivo o pega un respaldo JSON", size=12, color=colores["texto_secundario"]),
                             ], expand=True, spacing=2),
-                            ft.IconButton(icon="upload_file", on_click=importar_backup, icon_color=colores["texto"])
+                            ft.IconButton(icon="upload_file", tooltip="Seleccionar archivo", on_click=importar_backup, icon_color=colores["texto"]),
+                            ft.IconButton(icon="content_paste", tooltip="Pegar respaldo JSON", on_click=abrir_restauracion_pegada, icon_color=colores["texto"]),
                         ]),
                         padding=15,
                         bgcolor=colores["cyan_bg"],
@@ -3212,27 +3327,82 @@ def main(page: ft.Page):
     # =====================================================
     
     def crear_vista_presupuestos():
-        """Crea la vista de presupuestos por categoría"""
+        """Crea controles de gasto por categoría y permite agregar controles personalizados."""
         colores = get_colores()
         lista_presupuestos = ft.ListView(spacing=10, padding=10, expand=True)
-        
         presupuestos = db.obtener_presupuestos()
+
+        if not presupuestos:
+            categorias = ["Comida"]
+        else:
+            categorias = sorted({registro[1] for registro in presupuestos})
+
+        def abrir_agregar_control(e):
+            selector_tipo = ft.Dropdown(
+                label="Tipo de gasto",
+                options=[ft.dropdown.Option(c) for c in ("Comida", "Transporte", "Servicios", "Ocio", "Salud", "Compras", "Educación", "Otro")],
+                value="Otro",
+            )
+            nombre = ft.TextField(label="Nombre del control", hint_text="Ej.: Mascotas, arriendo, bencina")
+
+            def guardar_control(_):
+                etiqueta = (nombre.value or "").strip()
+                if not etiqueta:
+                    nombre.error_text = "Escribe un nombre para este control."
+                    page.update()
+                    return
+                categoria = f"{selector_tipo.value} · {etiqueta}"
+                if any(registro[1] == categoria for registro in db.obtener_presupuestos()):
+                    nombre.error_text = "Ya existe un control con ese tipo y nombre."
+                    page.update()
+                    return
+                if db.agregar_categoria_personalizada(categoria, "gasto") and db.agregar_presupuesto(categoria, 0):
+                    hoja.open = False
+                    actualizar_vista()
+                    page.show_snack_bar(ft.SnackBar(
+                        content=ft.Text(f"Control ‘{categoria}’ agregado. Define su límite mensual."),
+                        bgcolor=colores["verde"], duration=5000,
+                    ))
+                else:
+                    nombre.error_text = "No se pudo crear el control. Prueba con otro nombre."
+                    page.update()
+
+            hoja = ft.BottomSheet(
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("➕ Nuevo control de gasto", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
+                        selector_tipo,
+                        nombre,
+                        ft.Row([
+                            ft.TextButton("Cancelar", on_click=lambda _: (setattr(hoja, "open", False), page.update())),
+                            ft.ElevatedButton("Agregar", on_click=guardar_control, bgcolor=colores["verde"], color="white"),
+                        ], alignment=ft.MainAxisAlignment.END),
+                    ], tight=True, spacing=12),
+                    padding=20, bgcolor=colores["tarjeta"],
+                    border_radius=ft.border_radius.only(top_left=20, top_right=20),
+                ),
+                is_scroll_controlled=True, use_safe_area=True,
+            )
+            page.overlay.append(hoja)
+            hoja.open = True
+            page.update()
         
         # Header
         header = ft.Container(
             content=ft.Column([
-                ft.Text("📋 Presupuestos por Categoría", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"]),
-                ft.Divider(height=10, color="transparent"),
-                ft.Text("Define límites de gasto para cada categoría y controla mejor tus finanzas.", 
-                       size=14, color=colores["texto_secundario"]),
-            ]),
+                ft.Row([
+                    ft.Text("📋 Control de gastos", size=20, weight=ft.FontWeight.BOLD, color=colores["texto"], expand=True),
+                    ft.ElevatedButton("Agregar", icon="add", on_click=abrir_agregar_control,
+                                      bgcolor=colores["verde"], color="white"),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Text("Define un límite mensual por tipo de gasto. Puedes crear controles con el nombre que quieras.",
+                        size=14, color=colores["texto_secundario"]),
+            ], spacing=10),
             padding=20,
             bgcolor=colores["naranja_bg"],
             border_radius=15,
             margin=10
         )
-        
-        categorias = ["Comida", "Transporte", "Servicios", "Ocio", "Salud", "Compras", "Educación", "Otro"]
         
         for cat in categorias:
             # Buscar si hay presupuesto definido
@@ -3274,6 +3444,7 @@ def main(page: ft.Page):
                     ft.Row([
                         ft.TextField(
                             hint_text="Límite",
+                            value=formatear_texto_importe(limite) if limite > 0 else "",
                             keyboard_type=ft.KeyboardType.NUMBER,
                             width=120,
                             height=40,
@@ -3588,7 +3759,8 @@ def main(page: ft.Page):
             and not contenedor_onboarding.visible
             and vista_actual not in ("balance", "configuracion")
         )
-        page.floating_action_button.bgcolor = colores_actuales["appbar"]
+        page.floating_action_button.bgcolor = colores_actuales["azul"]
+        page.floating_action_button.icon_color = "white"
         page.navigation_bar.visible = app_desbloqueada[0] and not contenedor_onboarding.visible
 
         page.update()
@@ -3650,7 +3822,8 @@ def main(page: ft.Page):
     # Botón Flotante
     page.floating_action_button = ft.FloatingActionButton(
         icon="add",
-        bgcolor=colores["appbar"],
+        bgcolor=colores["azul"],
+        icon_color="white",
         on_click=abrir_agregar
     )
     page.floating_action_button.visible = False
@@ -3671,6 +3844,7 @@ def main(page: ft.Page):
     page.overlay.append(bottom_sheet_monto_banco)
     page.overlay.append(bottom_sheet_mas)
     page.overlay.append(dialogo_confirmacion)
+    page.overlay.append(dialogo_restauracion)
     
     # =====================================================
     # PANTALLA DE LOGIN (PIN)

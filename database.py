@@ -35,6 +35,13 @@ class Database:
                 anio INTEGER
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS categorias_personalizadas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL UNIQUE,
+                tipo TEXT NOT NULL DEFAULT 'gasto'
+            )
+        """)
         # Tabla de movimientos (solo personal)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS movimientos (
@@ -555,7 +562,7 @@ class Database:
             cursor = self.conn.cursor()
             datos = {}
             
-            tablas = ['movimientos', 'suscripciones', 'prestamos', 'ahorros', 'creditos', 'cuentas_bancarias', 'presupuestos', 'transferencias']
+            tablas = ['movimientos', 'suscripciones', 'prestamos', 'ahorros', 'creditos', 'cuentas_bancarias', 'presupuestos', 'transferencias', 'categorias_personalizadas']
             
             for tabla in tablas:
                 cursor.execute(f"SELECT * FROM {tabla}")
@@ -572,18 +579,32 @@ class Database:
         try:
             datos = json.loads(json_data)
             cursor = self.conn.cursor()
-            tablas_permitidas = {"movimientos", "suscripciones", "prestamos", "ahorros", "creditos", "cuentas_bancarias", "presupuestos", "transferencias"}
-            if not isinstance(datos, dict) or not datos or not set(datos).issubset(tablas_permitidas):
+            tablas_permitidas = {"movimientos", "suscripciones", "prestamos", "ahorros", "creditos", "cuentas_bancarias", "presupuestos", "transferencias", "categorias_personalizadas"}
+            tablas_requeridas = {"movimientos", "suscripciones", "prestamos", "ahorros", "creditos", "cuentas_bancarias", "presupuestos", "transferencias"}
+            if not isinstance(datos, dict) or not tablas_requeridas.issubset(datos) or not set(datos).issubset(tablas_permitidas):
                 return False
-            cursor.execute("BEGIN IMMEDIATE")
+            # Compatibilidad con respaldos antiguos, que no incluían categorías personalizadas.
+            datos.setdefault("categorias_personalizadas", [])
+
+            # Valida toda la estructura antes de modificar nada. Los respaldos
+            # exportados incluyen listas vacías para tablas sin registros.
+            filas_validadas = {}
             for tabla, registros in datos.items():
                 if not isinstance(registros, list):
-                    raise ValueError(f"Formato inválido en {tabla}")
+                    return False
                 cursor.execute(f"PRAGMA table_info({tabla})")
                 columnas_validas = {fila[1] for fila in cursor.fetchall()}
+                if not columnas_validas:
+                    return False
                 for registro in registros:
-                    if not isinstance(registro, dict) or not set(registro).issubset(columnas_validas):
-                        raise ValueError(f"Registro inválido en {tabla}")
+                    if not isinstance(registro, dict) or not registro or not set(registro).issubset(columnas_validas):
+                        return False
+                filas_validadas[tabla] = registros
+
+            cursor.execute("BEGIN IMMEDIATE")
+            for tabla, registros in filas_validadas.items():
+                cursor.execute(f"DELETE FROM {tabla}")
+                for registro in registros:
                     columnas = ', '.join(registro.keys())
                     placeholders = ', '.join(['?' for _ in registro])
                     valores = list(registro.values())
@@ -595,6 +616,33 @@ class Database:
         except Exception as e:
             self.conn.rollback()
             print(f"Error al importar: {e}")
+            return False
+
+    def obtener_categorias_personalizadas(self, tipo=None):
+        try:
+            cursor = self.conn.cursor()
+            if tipo:
+                cursor.execute("SELECT nombre, tipo FROM categorias_personalizadas WHERE tipo = ? ORDER BY nombre", (tipo,))
+            else:
+                cursor.execute("SELECT nombre, tipo FROM categorias_personalizadas ORDER BY nombre")
+            return cursor.fetchall()
+        except Exception as e:
+            print(f"Error al obtener categorías personalizadas: {e}")
+            return []
+
+    def agregar_categoria_personalizada(self, nombre, tipo="gasto"):
+        nombre = (nombre or "").strip()
+        if not nombre or tipo not in ("gasto", "ingreso"):
+            return False
+        try:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO categorias_personalizadas (nombre, tipo) VALUES (?, ?)",
+                (nombre, tipo),
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error al guardar categoría personalizada: {e}")
             return False
 
     def agregar_movimiento(self, tipo, categoria, monto, descripcion):

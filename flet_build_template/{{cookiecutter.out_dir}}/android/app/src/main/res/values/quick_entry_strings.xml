@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="quick_entry_widget_description">Atajos rápidos para agregar ingresos y gastos.</string>
+    <string name="finance_summary_widget_description">Resumen de gastos de hoy, semana y mes, junto con tus ahorros.</string>
 </resources>
