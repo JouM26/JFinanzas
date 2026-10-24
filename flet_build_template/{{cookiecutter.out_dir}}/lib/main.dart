@@ -17,13 +17,13 @@ import "python.dart";
 /*
 {% set show_boot_screen = get_pyproject("tool.flet." ~ cookiecutter.options.config_platform ~ ".app.boot_screen.show")
                         or get_pyproject("tool.flet.app.boot_screen.show")
-                        or False %}
+                        or True %}
 {% set boot_screen_message = get_pyproject("tool.flet." ~ cookiecutter.options.config_platform ~ ".app.boot_screen.message")
                         or get_pyproject("tool.flet.app.boot_screen.message") %}
 
 {% set show_startup_screen = get_pyproject("tool.flet." ~ cookiecutter.options.config_platform ~ ".app.startup_screen.show")
                         or get_pyproject("tool.flet.app.startup_screen.show")
-                        or False %}
+                        or True %}
 {% set startup_screen_message = get_pyproject("tool.flet." ~ cookiecutter.options.config_platform ~ ".app.startup_screen.message")
                         or get_pyproject("tool.flet.app.startup_screen.message") %}
 
@@ -43,9 +43,9 @@ const assetPath = "app/app.zip";
 const pythonModuleName = "{{ cookiecutter.python_module_name }}";
 // Mostrar una pantalla de carga legible mientras se extraen los recursos de
 // Python y se conecta Flet. La pantalla vacía anterior parecía un bloqueo.
-final showAppBootScreen = bool.tryParse("{{ show_boot_screen }}".toLowerCase()) ?? true;
+const showAppBootScreen = true;
 const appBootScreenMessage = '{{ boot_screen_message | default("Preparando la aplicación…", true) }}';
-final showAppStartupScreen = bool.tryParse("{{ show_startup_screen }}".toLowerCase()) ?? true;
+const showAppStartupScreen = true;
 const appStartupScreenMessage = '{{ startup_screen_message | default("Cargando tus finanzas…", true) }}';
 
 List<CreateControlFactory> createControlFactories = [
