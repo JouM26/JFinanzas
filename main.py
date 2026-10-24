@@ -3078,7 +3078,7 @@ def main(page: ft.Page):
             page.appbar.bgcolor = colores_actuales["appbar"]
             page.navigation_bar.bgcolor = colores_actuales["tarjeta"]
             page.floating_action_button.bgcolor = colores_actuales["azul"]
-            page.floating_action_button.icon_color = "white"
+            page.floating_action_button.foreground_color = "white"
             for campo in campos_texto_app:
                 campo.color = colores_actuales["texto"]
                 campo.bgcolor = colores_actuales["input_bg"]
@@ -3760,7 +3760,7 @@ def main(page: ft.Page):
             and vista_actual not in ("balance", "configuracion")
         )
         page.floating_action_button.bgcolor = colores_actuales["azul"]
-        page.floating_action_button.icon_color = "white"
+        page.floating_action_button.foreground_color = "white"
         page.navigation_bar.visible = app_desbloqueada[0] and not contenedor_onboarding.visible
 
         page.update()
@@ -3823,7 +3823,7 @@ def main(page: ft.Page):
     page.floating_action_button = ft.FloatingActionButton(
         icon="add",
         bgcolor=colores["azul"],
-        icon_color="white",
+        foreground_color="white",
         on_click=abrir_agregar
     )
     page.floating_action_button.visible = False
