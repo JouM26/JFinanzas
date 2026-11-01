@@ -7,4 +7,11 @@ class MainActivity: FlutterActivity() {
         super.onResume()
         FinanceSummaryWidgetProvider.requestRefresh(this)
     }
+
+    override fun onPause() {
+        // Al volver al escritorio, SQLite ya contiene los cambios guardados
+        // por Flet y el widget puede mostrar el resumen actualizado.
+        FinanceSummaryWidgetProvider.requestRefresh(this)
+        super.onPause()
+    }
 }

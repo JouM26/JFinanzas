@@ -51,18 +51,17 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
 
     private fun updateWidgets(context: Context, manager: AppWidgetManager, appWidgetIds: IntArray) {
         val totals = loadTotals(context)
-        val money = NumberFormat.getNumberInstance(Locale.US).apply { maximumFractionDigits = 0 }
         appWidgetIds.forEach { id ->
             val views = RemoteViews(context.packageName, R.layout.finance_summary_widget).apply {
-                setTextViewText(R.id.summary_today, "Hoy gastado\n\$${money.format(totals[0])}")
-                setTextViewText(R.id.summary_week, "Esta semana\n\$${money.format(totals[1])}")
+                setTextViewText(R.id.summary_today, "Hoy\n${formatMoney(totals[0])}")
+                setTextViewText(R.id.summary_week, "Semana\n${formatMoney(totals[1])}")
                 val monthStatus = if (totals[4] > 0) {
-                    "Mes: \$${money.format(totals[2])}\n${(totals[2] / totals[4] * 100).toInt()}% del límite"
+                    "Mes\n${formatMoney(totals[2])} / ${formatMoney(totals[4])}"
                 } else {
-                    "Mes: \$${money.format(totals[2])}\nSin límite definido"
+                    "Mes\n${formatMoney(totals[2])}"
                 }
                 setTextViewText(R.id.summary_month, monthStatus)
-                setTextViewText(R.id.summary_savings, "Ahorros\n\$${money.format(totals[3])}")
+                setTextViewText(R.id.summary_savings, "Ahorro\n${formatMoney(totals[3])}")
                 val openApp = PendingIntent.getActivity(
                     context,
                     id,
@@ -78,7 +77,6 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
 
     private fun loadTotals(context: Context): DoubleArray {
         val canonical = File(context.filesDir, "app_flutter/finanzas.db")
-        if (canonical.isFile) return loadTotalsFromFile(canonical)
         val candidates = linkedSetOf(
             canonical,
             File(context.filesDir, "data/finanzas.db"),
@@ -92,13 +90,23 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
             }.forEach { candidates.add(it) }
         } catch (_: Exception) { }
 
-        val file = candidates.filter { it.isFile }.maxByOrNull { candidate ->
+        val mejores = candidates.filter { it.isFile }.mapNotNull { candidate ->
             try {
                 SQLiteDatabase.openDatabase(candidate.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-                    countRows(db, "cuentas_bancarias") * 1_000_000L + countRows(db, "movimientos") * 1_000L + candidate.length()
+                    Triple(
+                        candidate,
+                        countRows(db, "cuentas_bancarias", "activa = 1"),
+                        countRows(db, "movimientos"),
+                    )
                 }
-            } catch (_: Exception) { -1L }
-        } ?: return DoubleArray(5)
+            } catch (_: Exception) { null }
+        }
+        val file = mejores.maxWithOrNull(
+            compareBy<Triple<File, Long, Long>> { it.second }
+                .thenBy { it.third }
+                .thenBy { it.first.length() }
+                .thenBy { it.first.lastModified() }
+        )?.first ?: return DoubleArray(5)
 
         return loadTotalsFromFile(file)
     }
@@ -118,12 +126,13 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
         } catch (_: Exception) { DoubleArray(5) }
     }
 
-    private fun countRows(db: SQLiteDatabase, table: String): Long {
+    private fun countRows(db: SQLiteDatabase, table: String, condition: String = ""): Long {
         val exists = db.rawQuery(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", arrayOf(table)
         ).use { it.moveToFirst() }
         if (!exists) return 0L
-        return db.rawQuery("SELECT COUNT(*) FROM $table", null).use {
+        val where = if (condition.isBlank()) "" else " WHERE $condition"
+        return db.rawQuery("SELECT COUNT(*) FROM $table$where", null).use {
             if (it.moveToFirst()) it.getLong(0) else 0L
         }
     }
@@ -131,4 +140,18 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
     private fun sum(db: SQLiteDatabase, query: String): Double = try {
         db.rawQuery(query, null).use { if (it.moveToFirst()) it.getDouble(0) else 0.0 }
     } catch (_: Exception) { 0.0 }
+
+    private fun formatMoney(value: Double): String {
+        val amount = kotlin.math.abs(value)
+        val (scaled, suffix) = when {
+            amount >= 1_000_000 -> value / 1_000_000.0 to "M"
+            amount >= 10_000 -> value / 1_000.0 to "k"
+            else -> value to ""
+        }
+        val number = NumberFormat.getNumberInstance(Locale.US).apply {
+            maximumFractionDigits = if (suffix.isEmpty()) 0 else 1
+            minimumFractionDigits = 0
+        }.format(scaled)
+        return "\$$number$suffix"
+    }
 }

@@ -387,7 +387,9 @@ class Database:
             origen = cursor.fetchone()
             cursor.execute("SELECT tipo_cuenta FROM cuentas_bancarias WHERE id = ? AND activa = 1", (cuenta_destino,))
             destino = cursor.fetchone()
-            if not origen or not destino or origen[0] == "credito" or destino[0] == "credito":
+            tipo_origen = str(origen[0] or "").casefold().replace("é", "e") if origen else ""
+            tipo_destino = str(destino[0] or "").casefold().replace("é", "e") if destino else ""
+            if not origen or not destino or "credito" in tipo_origen or "credit" in tipo_origen or "credito" in tipo_destino or "credit" in tipo_destino:
                 self.conn.rollback()
                 return False
             cursor.execute("UPDATE cuentas_bancarias SET saldo = saldo - ? WHERE id = ?", (monto, cuenta_origen))
@@ -859,7 +861,8 @@ class Database:
             if cuenta_id is not None:
                 cursor.execute("SELECT tipo_cuenta FROM cuentas_bancarias WHERE id = ? AND activa = 1", (cuenta_id,))
                 cuenta = cursor.fetchone()
-                if not cuenta or cuenta[0] == "credito":
+                tipo_cuenta = str(cuenta[0] or "").casefold().replace("é", "e") if cuenta else ""
+                if not cuenta or "credito" in tipo_cuenta or "credit" in tipo_cuenta:
                     raise ValueError("Selecciona una cuenta bancaria activa.")
             if cuenta_anterior is not None:
                 delta_anterior = monto_anterior if tipo_anterior == "gasto" else -monto_anterior
@@ -910,7 +913,8 @@ class Database:
                 nombre_cuenta, tipo_cuenta, saldo, limite = cuenta
                 saldo = saldo or 0
                 limite = limite or 0
-                es_tarjeta = tipo_cuenta == "credito"
+                tipo_cuenta_normalizado = str(tipo_cuenta or "").casefold().replace("é", "e")
+                es_tarjeta = "credito" in tipo_cuenta_normalizado or "credit" in tipo_cuenta_normalizado
                 if medio_pago == "tarjeta_credito" and not es_tarjeta:
                     raise ValueError("Selecciona una cuenta registrada como tarjeta de crédito.")
                 if medio_pago == "banco" and es_tarjeta:

@@ -88,6 +88,58 @@ def main(page: ft.Page):
     def get_colores():
         es_oscuro = page.theme_mode == ft.ThemeMode.DARK
         return obtener_colores(es_oscuro)
+
+    def aplicar_texto_blanco_modo_oscuro():
+        """Fuerza texto legible en blanco en controles visibles del tema oscuro."""
+        if page.theme_mode != ft.ThemeMode.DARK:
+            return
+
+        visitados = set()
+        clases_boton = tuple(
+            clase for nombre in ("ElevatedButton", "TextButton", "OutlinedButton", "FilledButton")
+            if (clase := getattr(ft, nombre, None)) is not None
+        )
+        atributos_hijos = (
+            "controls", "content", "leading", "title", "subtitle", "actions",
+            "bottom", "trailing", "navigation_bar", "appbar", "floating_action_button",
+        )
+
+        def recorrer(valor):
+            if valor is None or isinstance(valor, (str, bytes, int, float, bool)):
+                return
+            if isinstance(valor, (list, tuple, set)):
+                for elemento in valor:
+                    recorrer(elemento)
+                return
+            identidad = id(valor)
+            if identidad in visitados:
+                return
+            visitados.add(identidad)
+
+            if isinstance(valor, ft.Text):
+                valor.color = "#FFFFFF"
+            elif isinstance(valor, ft.TextField):
+                valor.color = "#FFFFFF"
+                valor.label_style = ft.TextStyle(color="#FFFFFF")
+                valor.hint_style = ft.TextStyle(color="#FFFFFF")
+            elif isinstance(valor, ft.Dropdown):
+                valor.color = "#FFFFFF"
+                valor.label_style = ft.TextStyle(color="#FFFFFF")
+                valor.text_style = ft.TextStyle(color="#FFFFFF")
+            else:
+                if clases_boton and isinstance(valor, clases_boton):
+                    valor.color = "#FFFFFF"
+
+            for atributo in atributos_hijos:
+                try:
+                    recorrer(getattr(valor, atributo, None))
+                except (AttributeError, TypeError):
+                    continue
+
+        recorrer(page.controls)
+        recorrer(page.overlay)
+        for raiz in (page.appbar, page.navigation_bar, page.floating_action_button):
+            recorrer(raiz)
     
     colores = get_colores()
     page.bgcolor = colores["fondo"]
@@ -154,10 +206,14 @@ def main(page: ft.Page):
     input_pin_actual_cambio = ft.TextField(
         label="PIN actual", password=True, can_reveal_password=True,
         keyboard_type=ft.KeyboardType.NUMBER, max_length=4, width=260,
+        color=colores["texto"], bgcolor=colores["input_bg"],
+        border_color=colores["input_border"], focused_border_color=colores["azul"],
     )
     input_pin_nuevo_cambio = ft.TextField(
         label="PIN nuevo (4 dígitos)", password=True, can_reveal_password=True,
         keyboard_type=ft.KeyboardType.NUMBER, max_length=4, width=260,
+        color=colores["texto"], bgcolor=colores["input_bg"],
+        border_color=colores["input_border"], focused_border_color=colores["azul"],
     )
     dropdown_pregunta_cambio_pin = ft.Dropdown(
         label="Pregunta de recuperación",
@@ -167,10 +223,14 @@ def main(page: ft.Page):
             "¿Cuál era el apodo de tu infancia?",
             "¿Cuál es el segundo nombre de tu madre?",
         )], width=300, visible=not db.tiene_pregunta_seguridad(),
+        color=colores["texto"], bgcolor=colores["input_bg"],
+        border_color=colores["input_border"], focused_border_color=colores["azul"],
     )
     input_respuesta_cambio_pin = ft.TextField(
         label="Respuesta de recuperación", width=300,
         visible=not db.tiene_pregunta_seguridad(),
+        color=colores["texto"], bgcolor=colores["input_bg"],
+        border_color=colores["input_border"], focused_border_color=colores["azul"],
     )
 
     def confirmar_cambio_pin(e):
@@ -592,16 +652,18 @@ def main(page: ft.Page):
 
         if medio_pago == "tarjeta_credito":
             dropdown_banco_movimiento.label = "Selecciona la tarjeta"
-            tipos_permitidos = {"credito"}
         else:
             dropdown_banco_movimiento.label = "Selecciona la cuenta bancaria"
-            tipos_permitidos = {"debito", "ahorro", "inversion"}
+
+        def es_tarjeta(cuenta):
+            tipo = str(cuenta[2] or "").strip().casefold().replace("é", "e")
+            return "credito" in tipo or "credit" in tipo
 
         cuentas = db.obtener_cuentas_bancarias() if requiere_cuenta else []
         opciones = [
             ft.dropdown.Option(f"cuenta_{cuenta[0]}", f"{cuenta[1]} ({cuenta[2]})")
             for cuenta in cuentas
-            if cuenta[2] in tipos_permitidos
+            if es_tarjeta(cuenta) == (medio_pago == "tarjeta_credito")
         ]
         dropdown_banco_movimiento.options = opciones
         valores_validos = {opcion.key for opcion in opciones}
@@ -965,7 +1027,7 @@ def main(page: ft.Page):
                         ft.Container(
                             content=ft.Column([
                                 ft.Icon("trending_up", color=colores["verde"], size=22),
-                                ft.Text(f"${ingresos_mes:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["verde"]),
+                                ft.Text(f"${ingresos_mes:,.0f}", size=11, weight=ft.FontWeight.BOLD, color=colores["verde"], max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                                 ft.Text("Ingresos", size=10, color=colores["texto_secundario"])
                             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                             bgcolor=colores["verde_bg"],
@@ -976,7 +1038,7 @@ def main(page: ft.Page):
                         ft.Container(
                             content=ft.Column([
                                 ft.Icon("trending_down", color=colores["rojo"], size=22),
-                                ft.Text(f"${gastos_mes:,.0f}", size=14, weight=ft.FontWeight.BOLD, color=colores["rojo"]),
+                                ft.Text(f"${gastos_mes:,.0f}", size=11, weight=ft.FontWeight.BOLD, color=colores["rojo"], max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                                 ft.Text("Gastos", size=10, color=colores["texto_secundario"])
                             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                             bgcolor=colores["rojo_bg"],
@@ -987,8 +1049,9 @@ def main(page: ft.Page):
                         ft.Container(
                             content=ft.Column([
                                 ft.Icon("account_balance_wallet", color=colores["azul"], size=22),
-                                ft.Text(f"${disponible_mes:,.0f}", size=14, weight=ft.FontWeight.BOLD, 
-                                       color=colores["verde"] if disponible_mes >= 0 else colores["rojo"]),
+                                ft.Text(f"${disponible_mes:,.0f}", size=11, weight=ft.FontWeight.BOLD,
+                                       color=colores["verde"] if disponible_mes >= 0 else colores["rojo"],
+                                       max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                                 ft.Text("Disponible", size=10, color=colores["texto_secundario"])
                             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                             bgcolor=colores["azul_bg"],
@@ -3088,15 +3151,35 @@ def main(page: ft.Page):
                 campo_pin.bgcolor = colores_actuales["tarjeta"]
                 campo_pin.border_color = colores_actuales["borde"]
                 campo_pin.focused_border_color = colores_actuales["azul"]
+            for campo_pin in (input_pin_actual_cambio, input_pin_nuevo_cambio, input_respuesta_cambio_pin):
+                campo_pin.color = colores_actuales["texto"]
+                campo_pin.bgcolor = colores_actuales["input_bg"]
+                campo_pin.border_color = colores_actuales["input_border"]
+                campo_pin.focused_border_color = colores_actuales["azul"]
+            dropdown_pregunta_cambio_pin.color = colores_actuales["texto"]
+            dropdown_pregunta_cambio_pin.bgcolor = colores_actuales["input_bg"]
+            dropdown_pregunta_cambio_pin.border_color = colores_actuales["input_border"]
+            aplicar_texto_blanco_modo_oscuro()
             page.update()
             actualizar_vista()
         
         def cambiar_pin(e):
             """Solicita PIN actual y PIN nuevo sin sacar al usuario de la app."""
+            colores_pin = get_colores()
             input_pin_actual_cambio.value = ""
             input_pin_nuevo_cambio.value = ""
             input_pin_actual_cambio.error_text = None
             input_pin_nuevo_cambio.error_text = None
+            for campo_pin in (input_pin_actual_cambio, input_pin_nuevo_cambio, input_respuesta_cambio_pin):
+                campo_pin.color = colores_pin["texto"]
+                campo_pin.bgcolor = colores_pin["input_bg"]
+                campo_pin.border_color = colores_pin["input_border"]
+                campo_pin.focused_border_color = colores_pin["azul"]
+            dropdown_pregunta_cambio_pin.color = colores_pin["texto"]
+            dropdown_pregunta_cambio_pin.bgcolor = colores_pin["input_bg"]
+            dropdown_pregunta_cambio_pin.border_color = colores_pin["input_border"]
+            bottom_sheet_cambiar_pin.content.bgcolor = colores_pin["tarjeta"]
+            bottom_sheet_cambiar_pin.content.content.controls[0].color = colores_pin["texto"]
             bottom_sheet_cambiar_pin.open = True
             page.update()
         
@@ -3359,6 +3442,9 @@ def main(page: ft.Page):
                     return
                 if db.agregar_categoria_personalizada(categoria, "gasto") and db.agregar_presupuesto(categoria, 0):
                     hoja.open = False
+                    if hoja in page.overlay:
+                        page.overlay.remove(hoja)
+                    page.update()
                     actualizar_vista()
                     page.show_snack_bar(ft.SnackBar(
                         content=ft.Text(f"Control ‘{categoria}’ agregado. Define su límite mensual."),
@@ -3368,6 +3454,12 @@ def main(page: ft.Page):
                     nombre.error_text = "No se pudo crear el control. Prueba con otro nombre."
                     page.update()
 
+            def cerrar_hoja(_):
+                hoja.open = False
+                if hoja in page.overlay:
+                    page.overlay.remove(hoja)
+                page.update()
+
             hoja = ft.BottomSheet(
                 ft.Container(
                     content=ft.Column([
@@ -3375,7 +3467,7 @@ def main(page: ft.Page):
                         selector_tipo,
                         nombre,
                         ft.Row([
-                            ft.TextButton("Cancelar", on_click=lambda _: (setattr(hoja, "open", False), page.update())),
+                            ft.TextButton("Cancelar", on_click=cerrar_hoja),
                             ft.ElevatedButton("Agregar", on_click=guardar_control, bgcolor=colores["verde"], color="white"),
                         ], alignment=ft.MainAxisAlignment.END),
                     ], tight=True, spacing=12),
@@ -3386,6 +3478,7 @@ def main(page: ft.Page):
             )
             page.overlay.append(hoja)
             hoja.open = True
+            aplicar_texto_blanco_modo_oscuro()
             page.update()
         
         # Header
@@ -3486,11 +3579,20 @@ def main(page: ft.Page):
                 try:
                     limite = float(normalizar_texto_importe(control.value))
                     if limite > 0:
-                        db.agregar_presupuesto(categoria, limite)
-                        actualizar_vista()
-                        page.show_snack_bar(
-                            ft.SnackBar(content=ft.Text(f"✅ Presupuesto de {categoria} guardado"), bgcolor="green")
-                        )
+                        if db.agregar_presupuesto(categoria, limite):
+                            actualizar_vista()
+                            page.show_snack_bar(
+                                ft.SnackBar(content=ft.Text(f"✅ Límite de {categoria} guardado"), bgcolor="green")
+                            )
+                        else:
+                            page.show_snack_bar(ft.SnackBar(
+                                content=ft.Text("No se pudo guardar el límite. Inténtalo nuevamente."),
+                                bgcolor="red",
+                            ))
+                    else:
+                        page.show_snack_bar(ft.SnackBar(
+                            content=ft.Text("El límite debe ser mayor que cero."), bgcolor="red"
+                        ))
                 except:
                     page.show_snack_bar(
                         ft.SnackBar(content=ft.Text("❌ Ingresa un número válido"), bgcolor="red")
@@ -3505,10 +3607,14 @@ def main(page: ft.Page):
         """Crea la vista de transferencias entre cuentas"""
         colores = get_colores()
         cuentas = db.obtener_cuentas_bancarias()
-        transferencias = db.obtener_transferencias()
         
         # Header con formulario de transferencia
-        opciones_cuentas = [ft.dropdown.Option(str(c[0]), f"{c[1]} ({c[2]})") for c in cuentas]
+        cuentas_transferibles = [
+            c for c in cuentas
+            if "credito" not in str(c[2] or "").strip().casefold().replace("é", "e")
+            and "credit" not in str(c[2] or "").strip().casefold()
+        ]
+        opciones_cuentas = [ft.dropdown.Option(str(c[0]), f"{c[1]} ({c[2]})") for c in cuentas_transferibles]
         
         dropdown_origen = ft.Dropdown(
             label="Cuenta origen",
@@ -3551,26 +3657,40 @@ def main(page: ft.Page):
                     raise ValueError()
                 cuenta_origen_id = int(dropdown_origen.value)
                 cuenta_destino_id = int(dropdown_destino.value)
-                nombre_origen = next((c[1] for c in cuentas if c[0] == cuenta_origen_id), "origen")
-                nombre_destino = next((c[1] for c in cuentas if c[0] == cuenta_destino_id), "destino")
-
-                if db.realizar_transferencia(cuenta_origen_id, cuenta_destino_id, monto):
-                    ultima_transferencia[0] = (monto, nombre_origen, nombre_destino, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
-                    page.show_snack_bar(
-                        ft.SnackBar(content=ft.Text(f"✅ Transferencia realizada: ${monto:,.0f} · {nombre_origen} → {nombre_destino}"), bgcolor=colores["verde"], duration=7000)
-                    )
-                    dropdown_origen.value = None
-                    dropdown_destino.value = None
-                    input_monto_trans.value = ""
-                    actualizar_vista()
-                else:
-                    page.show_snack_bar(
-                        ft.SnackBar(content=ft.Text("❌ Error en la transferencia"), bgcolor=colores["rojo"])
-                    )
-            except:
+                nombre_origen = next((c[1] for c in cuentas_transferibles if c[0] == cuenta_origen_id), "origen")
+                nombre_destino = next((c[1] for c in cuentas_transferibles if c[0] == cuenta_destino_id), "destino")
+            except (TypeError, ValueError):
                 page.show_snack_bar(
                     ft.SnackBar(content=ft.Text("❌ Monto inválido"), bgcolor=colores["rojo"])
                 )
+                return
+
+            if not db.realizar_transferencia(cuenta_origen_id, cuenta_destino_id, monto):
+                page.show_snack_bar(ft.SnackBar(
+                    content=ft.Text("❌ No se realizó: revisa que ambas cuentas estén activas y no sean tarjetas de crédito."),
+                    bgcolor=colores["rojo"], duration=6000,
+                ))
+                return
+
+            ultima_transferencia[0] = (
+                monto, nombre_origen, nombre_destino,
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            )
+            dropdown_origen.value = None
+            dropdown_destino.value = None
+            input_monto_trans.value = ""
+            try:
+                refrescar_historial_transferencias(ultima_transferencia[0])
+                actualizar_balance()
+                page.update()
+            except Exception:
+                # El registro ya quedó confirmado en SQLite; reconstruye la vista
+                # sin reportar falsamente que el problema fue el monto.
+                actualizar_vista()
+            page.show_snack_bar(ft.SnackBar(
+                content=ft.Text(f"✅ Transferencia guardada: ${monto:,.0f} · {nombre_origen} → {nombre_destino}"),
+                bgcolor=colores["verde"], duration=7000,
+            ))
         
         header = ft.Container(
             content=ft.Column([
@@ -3592,6 +3712,46 @@ def main(page: ft.Page):
         
         # Historial de transferencias
         lista_trans = ft.ListView(spacing=10, padding=10, expand=True)
+
+        def crear_tarjeta_transferencia(trans):
+            _id, origen, destino, monto, fecha, _descripcion = trans
+            return ft.Container(
+                content=ft.Row([
+                    ft.Icon("swap_horiz", color=colores["cyan"]),
+                    ft.Column([
+                        ft.Text(f"{origen} → {destino}", weight=ft.FontWeight.BOLD, size=14, color=colores["texto"]),
+                        ft.Text(fecha, size=12, color=colores["texto_secundario"]),
+                    ], expand=True, spacing=2),
+                    ft.Text(f"${monto:,.0f}", weight=ft.FontWeight.BOLD, color=colores["cyan"], size=16)
+                ]),
+                padding=12, bgcolor=colores["tarjeta"], border_radius=10,
+                border=ft.border.all(1, colores["borde"]),
+            )
+
+        def refrescar_historial_transferencias(confirmacion=None):
+            """Repinta el historial tras confirmar el commit, sin navegar fuera y volver."""
+            lista_trans.controls.clear()
+            if confirmacion:
+                monto_ok, origen_ok, destino_ok, fecha_ok = confirmacion
+                lista_trans.controls.append(ft.Container(
+                    content=ft.Row([
+                        ft.Icon("check_circle", color=colores["verde"], size=26),
+                        ft.Column([
+                            ft.Text("Transferencia guardada", weight=ft.FontWeight.BOLD, color=colores["verde"]),
+                            ft.Text(f"${monto_ok:,.0f} · {origen_ok} → {destino_ok} · {fecha_ok}", color=colores["texto"]),
+                        ], spacing=3, expand=True),
+                    ]), padding=14, bgcolor=colores["tarjeta"],
+                    border=ft.border.all(1, colores["verde"]), border_radius=12,
+                ))
+            filas = db.obtener_transferencias()
+            if not filas:
+                lista_trans.controls.append(ft.Container(
+                    content=ft.Text("No hay transferencias registradas.", italic=True, color=colores["texto_secundario"]),
+                    padding=40, alignment=ft.alignment.center,
+                ))
+            else:
+                lista_trans.controls.extend(crear_tarjeta_transferencia(fila) for fila in filas)
+
         confirmacion_transferencia = None
         if ultima_transferencia[0]:
             monto_ok, origen_ok, destino_ok, fecha_ok = ultima_transferencia[0]
@@ -3607,33 +3767,7 @@ def main(page: ft.Page):
                 bgcolor=colores["tarjeta"], border=ft.border.all(1, colores["verde"]), border_radius=12,
             )
         
-        if not transferencias:
-            lista_trans.controls.append(
-                ft.Container(
-                    content=ft.Text("No hay transferencias registradas.", italic=True, color=colores["texto_secundario"]),
-                    padding=40,
-                    alignment=ft.alignment.center
-                )
-            )
-        else:
-            for trans in transferencias:
-                id_t, origen, destino, monto, fecha, desc = trans
-                lista_trans.controls.append(
-                    ft.Container(
-                        content=ft.Row([
-                            ft.Icon("swap_horiz", color=colores["cyan"]),
-                            ft.Column([
-                                ft.Text(f"{origen} → {destino}", weight=ft.FontWeight.BOLD, size=14, color=colores["texto"]),
-                                ft.Text(fecha, size=12, color=colores["texto_secundario"]),
-                            ], expand=True, spacing=2),
-                            ft.Text(f"${monto:,.0f}", weight=ft.FontWeight.BOLD, color=colores["cyan"], size=16)
-                        ]),
-                        padding=12,
-                        bgcolor=colores["tarjeta"],
-                        border_radius=10,
-                        border=ft.border.all(1, colores["borde"])
-                    )
-                )
+        refrescar_historial_transferencias()
         
         return ft.Column([
             header,
@@ -3764,6 +3898,7 @@ def main(page: ft.Page):
         page.floating_action_button.foreground_color = "white"
         page.navigation_bar.visible = app_desbloqueada[0] and not contenedor_onboarding.visible
 
+        aplicar_texto_blanco_modo_oscuro()
         page.update()
 
     # Barra superior con botón de configuración
@@ -3907,6 +4042,7 @@ def main(page: ft.Page):
     ], expand=True)
     
     page.add(main_stack)
+    aplicar_texto_blanco_modo_oscuro()
     page.update()
 
 # Ejecutar la app

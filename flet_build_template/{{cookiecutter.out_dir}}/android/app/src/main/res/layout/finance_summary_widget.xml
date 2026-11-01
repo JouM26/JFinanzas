@@ -10,7 +10,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="💰 Resumen financiero"
+        android:text="💰 Finanzas"
         android:textColor="#FFFFFFFF"
         android:textSize="15sp"
         android:textStyle="bold"
@@ -28,9 +28,10 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center_vertical"
-            android:text="Hoy gastado\n$0"
+            android:text="Hoy\n$0"
             android:textColor="#FF58A6FF"
-            android:textSize="13sp"
+            android:textSize="11sp"
+            android:maxLines="2"
             android:textStyle="bold" />
 
         <TextView
@@ -39,9 +40,10 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center_vertical"
-            android:text="Esta semana\n$0"
+            android:text="Semana\n$0"
             android:textColor="#FFFFB454"
-            android:textSize="13sp"
+            android:textSize="11sp"
+            android:maxLines="2"
             android:textStyle="bold" />
     </LinearLayout>
 
@@ -57,9 +59,10 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center_vertical"
-            android:text="Este mes\n$0"
+            android:text="Mes\n$0"
             android:textColor="#FFFF7373"
-            android:textSize="13sp"
+            android:textSize="11sp"
+            android:maxLines="2"
             android:textStyle="bold" />
 
         <TextView
@@ -68,9 +71,10 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center_vertical"
-            android:text="Ahorros\n$0"
+            android:text="Ahorro\n$0"
             android:textColor="#FF56D364"
-            android:textSize="13sp"
+            android:textSize="11sp"
+            android:maxLines="2"
             android:textStyle="bold" />
     </LinearLayout>
 </LinearLayout>
