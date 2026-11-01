@@ -3336,6 +3336,7 @@ def main(page: ft.Page):
             categorias = ["Comida"]
         else:
             categorias = sorted({registro[1] for registro in presupuestos})
+        gastos_del_mes = db.obtener_gastos_por_categoria_mes()
 
         def abrir_agregar_control(e):
             selector_tipo = ft.Dropdown(
@@ -3410,7 +3411,7 @@ def main(page: ft.Page):
             limite = presupuesto_cat[2] if presupuesto_cat else 0
             id_pres = presupuesto_cat[0] if presupuesto_cat else None
             
-            gasto_actual = db.obtener_gasto_categoria_mes(cat)
+            gasto_actual = gastos_del_mes.get(cat, 0)
             porcentaje = (gasto_actual / limite * 100) if limite > 0 else 0
             
             # Color según el porcentaje

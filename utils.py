@@ -7,11 +7,13 @@ import json
 import unicodedata
 import importlib.util
 import sys
+import sqlite3
 
 # Detectar la disponibilidad sin importar la librería completa. La importación
 # real se hace únicamente al exportar a Excel, para reducir el arranque en PC.
 _ES_ANDROID = (
     hasattr(sys, "getandroidapilevel")
+    or os.environ.get("FLET_PLATFORM", "").lower() == "android"
     or bool(os.environ.get("ANDROID_ROOT"))
     or bool(os.environ.get("ANDROID_DATA"))
 )
@@ -79,6 +81,8 @@ def es_android():
         # También verificar variable de entorno
         if os.environ.get('ANDROID_ROOT') or os.environ.get('ANDROID_DATA'):
             return True
+        if os.environ.get("FLET_PLATFORM", "").lower() == "android":
+            return True
         return False
     except:
         return False
@@ -90,10 +94,63 @@ def get_persistent_db_path():
     Esta ruta NO se elimina cuando se actualiza la app.
     """
     try:
-        # Serious Python establece el directorio actual en application-support/data.
-        # El widget nativo usa el mismo directorio: filesDir/data.
+        # Flet pasa esta ruta desde Flutter. En Android apunta a la carpeta
+        # persistente de la app (app_flutter), no al directorio donde se extrae
+        # el código empaquetado. El widget nativo usa esta misma carpeta.
         if es_android():
-            return str(pathlib.Path.cwd() / "finanzas.db")
+            data_dir_env = os.environ.get("FLET_APP_STORAGE_DATA")
+            if not data_dir_env:
+                raise RuntimeError("FLET_APP_STORAGE_DATA no está configurado en Android")
+            data_dir = pathlib.Path(data_dir_env).expanduser()
+            data_dir.mkdir(parents=True, exist_ok=True)
+            db_path = data_dir / "finanzas.db"
+
+            # Migración única desde ubicaciones usadas por versiones previas.
+            # SQLite backup incorpora también cambios que aún estén en WAL.
+            candidatos = [
+                pathlib.Path.cwd() / "finanzas.db",
+                pathlib.Path.cwd() / "data" / "finanzas.db",
+                data_dir.parent / "data" / "finanzas.db",
+                data_dir.parent / "flet" / "app" / "finanzas.db",
+                data_dir.parent / "flet" / "py" / "data" / "finanzas.db",
+                data_dir.parent / "flet" / "data" / "finanzas.db",
+                data_dir.parent / "flet" / "py" / "finanzas.db",
+            ]
+
+            def puntaje(base):
+                try:
+                    conexion = sqlite3.connect(f"file:{base}?mode=ro", uri=True, timeout=5)
+                    try:
+                        tablas = {fila[0] for fila in conexion.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'")}
+                        puntaje_total = 0
+                        for tabla, peso in (("movimientos", 1000), ("cuentas_bancarias", 100),
+                                            ("creditos", 20), ("ahorros", 10),
+                                            ("presupuestos", 5), ("transferencias", 5)):
+                            if tabla in tablas:
+                                puntaje_total += conexion.execute(
+                                    f'SELECT COUNT(*) FROM "{tabla}"').fetchone()[0] * peso
+                        return puntaje_total + len(tablas)
+                    finally:
+                        conexion.close()
+                except (sqlite3.Error, OSError):
+                    return -1
+
+            existentes = []
+            for candidato in dict.fromkeys(candidatos):
+                if candidato.is_file() and candidato.resolve() != db_path.resolve():
+                    existentes.append((puntaje(candidato), candidato))
+            mejor_puntaje = max((puntaje(base) for _, base in existentes), default=-1)
+            puntaje_actual = puntaje(db_path) if db_path.exists() else -1
+            if mejor_puntaje > puntaje_actual:
+                origen = max(existentes, key=lambda par: par[0])[1]
+                temporal = db_path.with_name("finanzas.db.migrando")
+                temporal.unlink(missing_ok=True)
+                with sqlite3.connect(str(origen), timeout=10) as fuente:
+                    with sqlite3.connect(str(temporal), timeout=10) as destino:
+                        fuente.backup(destino)
+                temporal.replace(db_path)
+            return str(db_path)
         
         sistema = platform.system().lower()
         

@@ -156,6 +156,12 @@ class Database:
                 if columna not in existentes:
                     cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {definicion}")
 
+        # Acelera el cálculo de gastos por categoría en la vista de control.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_movimientos_tipo_fecha_categoria "
+            "ON movimientos(tipo, fecha, categoria)"
+        )
+
         self.conn.commit()
     
     # --- Métodos de Configuración ---
@@ -329,15 +335,36 @@ class Database:
                 anio = datetime.datetime.now().year
             
             cursor = self.conn.cursor()
+            inicio = datetime.date(anio, mes, 1)
+            siguiente = datetime.date(anio + (mes == 12), 1 if mes == 12 else mes + 1, 1)
             cursor.execute("""
-                SELECT SUM(monto) FROM movimientos 
-                WHERE tipo = 'gasto' AND categoria = ? 
-                AND strftime('%m', fecha) = ? AND strftime('%Y', fecha) = ?
-            """, (categoria, f"{mes:02d}", str(anio)))
+                SELECT COALESCE(SUM(monto), 0) FROM movimientos
+                WHERE tipo = 'gasto' AND categoria = ? AND fecha >= ? AND fecha < ?
+            """, (categoria, inicio.isoformat(), siguiente.isoformat()))
             result = cursor.fetchone()[0]
             return result if result else 0
         except:
             return 0
+
+    def obtener_gastos_por_categoria_mes(self, mes=None, anio=None):
+        """Devuelve los gastos del mes agrupados, con una sola lectura de movimientos."""
+        try:
+            ahora = datetime.date.today()
+            mes = mes or ahora.month
+            anio = anio or ahora.year
+            inicio = datetime.date(anio, mes, 1)
+            siguiente = datetime.date(anio + (mes == 12), 1 if mes == 12 else mes + 1, 1)
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT categoria, COALESCE(SUM(monto), 0)
+                FROM movimientos
+                WHERE tipo = 'gasto' AND fecha >= ? AND fecha < ?
+                GROUP BY categoria
+            """, (inicio.isoformat(), siguiente.isoformat()))
+            return {categoria: monto for categoria, monto in cursor.fetchall()}
+        except Exception as e:
+            print(f"Error al resumir gastos por categoría: {e}")
+            return {}
     
     def borrar_presupuesto(self, id_presupuesto):
         try:

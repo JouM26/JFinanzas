@@ -44,12 +44,40 @@ jobs:
     - name: Install Dependencies
       run: pip install -r requirements.txt
 
+    # Para que Android permita instalar cada APK encima de la anterior, todas
+    # deben usar el mismo certificado. La clave se guarda en GitHub Secrets.
+    - name: Prepare Android signing key
+      shell: bash
+      env:
+        ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      run: |
+        if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+          echo "Falta el secreto ANDROID_KEYSTORE_BASE64. Configura los cuatro secretos Android antes de compilar una APK actualizable."
+          exit 1
+        fi
+        echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/jfinanzas-release.jks"
+        echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/jfinanzas-release.jks" >> "$GITHUB_ENV"
+
     # 6. Compilar la APK
     - name: Build APK
       shell: bash
+      env:
+        ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       run: |
+        if [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ]; then
+          echo "Faltan ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_PASSWORD o ANDROID_KEY_ALIAS en GitHub Secrets."
+          exit 1
+        fi
         for attempt in 1 2 3; do
-          if flet build apk --template flet_build_template --verbose 2>&1 | tee /tmp/flet-build.log; then
+          if flet build apk --template flet_build_template --verbose \
+            --build-number "$GITHUB_RUN_NUMBER" \
+            --android-signing-key-store "$ANDROID_KEYSTORE_PATH" \
+            --android-signing-key-store-password "$ANDROID_KEYSTORE_PASSWORD" \
+            --android-signing-key-password "$ANDROID_KEY_PASSWORD" \
+            --android-signing-key-alias "$ANDROID_KEY_ALIAS" \
+            2>&1 | tee /tmp/flet-build.log; then
             exit 0
           else
             build_status=${PIPESTATUS[0]}

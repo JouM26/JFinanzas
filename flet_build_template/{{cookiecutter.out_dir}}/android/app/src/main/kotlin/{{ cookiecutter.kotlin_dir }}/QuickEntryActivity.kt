@@ -406,7 +406,14 @@ class QuickEntryActivity : Activity() {
     }
 
     private fun resolveDatabaseFile(): File {
+        // Mismo directorio persistente que FLET_APP_STORAGE_DATA en Flutter.
+        // Si aún no existe (por ejemplo, el widget se usa antes de abrir la
+        // app tras actualizar), se deja que la migración de Python importe la
+        // base antigua en el siguiente inicio.
+        val canonical = File(filesDir, "app_flutter/finanzas.db")
+        if (canonical.isFile) return canonical
         val possibleFiles = linkedSetOf(
+            canonical,
             File(filesDir, "data/finanzas.db"),
             File(filesDir, "flet/py/data/finanzas.db"),
             File(filesDir, "flet/data/finanzas.db"),
@@ -449,7 +456,7 @@ class QuickEntryActivity : Activity() {
                 .thenBy { it.third }
                 .thenBy { it.first.length() }
                 .thenBy { it.first.lastModified() }
-        )?.first ?: possibleFiles.first()
+        )?.first ?: canonical
     }
 
     private fun countRows(database: SQLiteDatabase, table: String, condition: String = ""): Int {

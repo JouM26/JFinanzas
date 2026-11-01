@@ -77,7 +77,10 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
     }
 
     private fun loadTotals(context: Context): DoubleArray {
+        val canonical = File(context.filesDir, "app_flutter/finanzas.db")
+        if (canonical.isFile) return loadTotalsFromFile(canonical)
         val candidates = linkedSetOf(
+            canonical,
             File(context.filesDir, "data/finanzas.db"),
             File(context.filesDir, "flet/py/data/finanzas.db"),
             File(context.filesDir, "flet/data/finanzas.db"),
@@ -97,6 +100,10 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
             } catch (_: Exception) { -1L }
         } ?: return DoubleArray(5)
 
+        return loadTotalsFromFile(file)
+    }
+
+    private fun loadTotalsFromFile(file: File): DoubleArray {
         return try {
             SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
                 db.rawQuery("PRAGMA busy_timeout=5000", null).use { it.moveToFirst() }
