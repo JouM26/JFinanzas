@@ -238,7 +238,7 @@ class QuickEntryActivity : Activity() {
 
     private fun isCreditAccountType(value: String?): Boolean {
         val normalized = value.orEmpty().trim().lowercase(Locale.ROOT).replace("é", "e")
-        return normalized == "credito" || normalized == "tarjeta de credito" || normalized == "credit card"
+        return normalized.contains("credito") || normalized.contains("credit")
     }
 
     private fun saveMovement() {
@@ -411,7 +411,6 @@ class QuickEntryActivity : Activity() {
         // app tras actualizar), se deja que la migración de Python importe la
         // base antigua en el siguiente inicio.
         val canonical = File(filesDir, "app_flutter/finanzas.db")
-        if (canonical.isFile) return canonical
         val possibleFiles = linkedSetOf(
             canonical,
             File(filesDir, "data/finanzas.db"),
@@ -440,22 +439,20 @@ class QuickEntryActivity : Activity() {
                     null,
                     SQLiteDatabase.OPEN_READONLY
                 )
-                val counts = db.use {
-                    Pair(
-                        countRows(it, "cuentas_bancarias", "activa = 1"),
-                        countRows(it, "movimientos")
-                    )
+                val score = db.use {
+                    countRows(it, "movimientos") * 1_000L +
+                        countRows(it, "cuentas_bancarias", "activa = 1") * 100L +
+                        countRows(it, "creditos") * 20L + countRows(it, "ahorros") * 10L +
+                        countRows(it, "presupuestos") * 5L + countRows(it, "transferencias") * 5L
                 }
-                Triple(file, counts.first, counts.second)
+                Triple(file, score, file.lastModified())
             } catch (_: Exception) {
                 null
             }
         }
         return existing.maxWithOrNull(
-            compareBy<Triple<File, Int, Int>> { it.second }
+            compareBy<Triple<File, Long, Long>> { it.second }
                 .thenBy { it.third }
-                .thenBy { it.first.length() }
-                .thenBy { it.first.lastModified() }
         )?.first ?: canonical
     }
 

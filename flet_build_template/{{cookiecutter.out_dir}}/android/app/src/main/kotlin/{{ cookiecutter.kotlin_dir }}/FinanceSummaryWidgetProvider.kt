@@ -93,19 +93,16 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
         val mejores = candidates.filter { it.isFile }.mapNotNull { candidate ->
             try {
                 SQLiteDatabase.openDatabase(candidate.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-                    Triple(
-                        candidate,
-                        countRows(db, "cuentas_bancarias", "activa = 1"),
-                        countRows(db, "movimientos"),
-                    )
+                    val score = countRows(db, "movimientos") * 1_000L +
+                        countRows(db, "cuentas_bancarias", "activa = 1") * 100L +
+                        countRows(db, "creditos") * 20L + countRows(db, "ahorros") * 10L +
+                        countRows(db, "presupuestos") * 5L + countRows(db, "transferencias") * 5L
+                    Triple(candidate, score, candidate.lastModified())
                 }
             } catch (_: Exception) { null }
         }
         val file = mejores.maxWithOrNull(
-            compareBy<Triple<File, Long, Long>> { it.second }
-                .thenBy { it.third }
-                .thenBy { it.first.length() }
-                .thenBy { it.first.lastModified() }
+            compareBy<Triple<File, Long, Long>> { it.second }.thenBy { it.third }
         )?.first ?: return DoubleArray(5)
 
         return loadTotalsFromFile(file)
