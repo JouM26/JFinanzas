@@ -13,7 +13,7 @@ import java.text.NumberFormat
 import java.util.Locale
 import java.util.concurrent.Executors
 
-/** Widget de consulta rápida: gasto diario, semanal, mensual y ahorro acumulado. */
+/** Widget de consulta rápida: gasto diario, balance disponible, gasto mensual y ahorro. */
 class FinanceSummaryWidgetProvider : AppWidgetProvider() {
     companion object {
         private val refreshExecutor = Executors.newSingleThreadExecutor()
@@ -61,7 +61,7 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
         appWidgetIds.forEach { id ->
             val views = RemoteViews(context.packageName, R.layout.finance_summary_widget).apply {
                 setTextViewText(R.id.summary_today, "Hoy\n${formatMoney(totals[0])}")
-                setTextViewText(R.id.summary_week, "Semana\n${formatMoney(totals[1])}")
+                setTextViewText(R.id.summary_week, "Disponible\n${formatMoney(totals[1])}")
                 val monthStatus = if (totals[4] > 0) {
                     "Mes\n${formatMoney(totals[2])} / ${formatMoney(totals[4])}"
                 } else {
@@ -142,7 +142,7 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
                 db.rawQuery("PRAGMA busy_timeout=5000", null).use { it.moveToFirst() }
                 doubleArrayOf(
                     sum(db, "SELECT COALESCE(SUM(monto), 0) FROM movimientos WHERE tipo='gasto' AND date(fecha)=date('now','localtime')"),
-                    sum(db, "SELECT COALESCE(SUM(monto), 0) FROM movimientos WHERE tipo='gasto' AND date(fecha)>=date('now','localtime','weekday 0','-6 days') AND date(fecha)<=date('now','localtime')"),
+                    availableBalanceThisMonth(db),
                     sum(db, "SELECT COALESCE(SUM(monto), 0) FROM movimientos WHERE tipo='gasto' AND strftime('%Y-%m',fecha)=strftime('%Y-%m','now','localtime')"),
                     sum(db, "SELECT COALESCE(SUM(monto_actual), 0) FROM ahorros"),
                     sum(db, "SELECT COALESCE(SUM(limite), 0) FROM presupuestos"),
@@ -165,6 +165,16 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
     private fun sum(db: SQLiteDatabase, query: String): Double = try {
         db.rawQuery(query, null).use { if (it.moveToFirst()) it.getDouble(0) else 0.0 }
     } catch (_: Exception) { 0.0 }
+
+    /** Sigue la misma fórmula de Inicio: ingresos - gastos - compromisos del mes. */
+    private fun availableBalanceThisMonth(db: SQLiteDatabase): Double {
+        val ingresos = sum(db, "SELECT COALESCE(SUM(monto), 0) FROM movimientos WHERE tipo='ingreso' AND strftime('%Y-%m',fecha)=strftime('%Y-%m','now','localtime')")
+        val gastos = sum(db, "SELECT COALESCE(SUM(monto), 0) FROM movimientos WHERE tipo='gasto' AND strftime('%Y-%m',fecha)=strftime('%Y-%m','now','localtime')")
+        val suscripciones = sum(db, "SELECT COALESCE(SUM(monto), 0) FROM suscripciones WHERE activa=1")
+        val prestamos = sum(db, "SELECT COALESCE(SUM(cuota_mensual), 0) FROM prestamos WHERE activo=1")
+        val creditos = sum(db, "SELECT COALESCE(SUM(cuota_mensual), 0) FROM creditos WHERE pagado=0 AND (movimiento_id IS NULL OR substr(fecha_compra,1,7) != strftime('%Y-%m','now','localtime'))")
+        return ingresos - gastos - suscripciones - prestamos - creditos
+    }
 
     private fun formatMoney(value: Double): String {
         val amount = kotlin.math.abs(value)

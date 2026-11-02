@@ -3518,6 +3518,17 @@ def main(page: ft.Page):
                 color_progreso = colores["verde"]
                 estado = "✅ Dentro del presupuesto"
             
+            campo_limite = ft.TextField(
+                hint_text="Límite",
+                value=formatear_texto_importe(limite) if limite > 0 else "",
+                keyboard_type=ft.KeyboardType.NUMBER,
+                width=120,
+                height=40,
+                text_size=14,
+                data=cat,
+                on_change=formatear_campo_importe,
+            )
+
             item = ft.Container(
                 content=ft.Column([
                     ft.Row([
@@ -3536,22 +3547,13 @@ def main(page: ft.Page):
                         bgcolor=colores["borde"]
                     ) if limite > 0 else ft.Container(),
                     ft.Row([
-                        ft.TextField(
-                            hint_text="Límite",
-                            value=formatear_texto_importe(limite) if limite > 0 else "",
-                            keyboard_type=ft.KeyboardType.NUMBER,
-                            width=120,
-                            height=40,
-                            text_size=14,
-                            data=cat,
-                            on_change=formatear_campo_importe,
-                        ),
+                        campo_limite,
                         ft.ElevatedButton(
                             "Guardar",
                             bgcolor=colores["naranja"],
                             color="white",
                             height=40,
-                            on_click=lambda e, c=cat: guardar_presupuesto_cat(e, c)
+                            on_click=lambda e, c=cat, campo=campo_limite: guardar_presupuesto_cat(e, c, campo)
                         ),
                         ft.IconButton(
                             icon="delete",
@@ -3571,33 +3573,34 @@ def main(page: ft.Page):
         
         return ft.Column([header, lista_presupuestos], spacing=0, expand=True)
     
-    def guardar_presupuesto_cat(e, categoria):
-        """Guarda el presupuesto de una categoría"""
-        # Buscar el TextField correspondiente
-        for control in e.control.parent.controls:
-            if isinstance(control, ft.TextField) and control.data == categoria:
-                try:
-                    limite = float(normalizar_texto_importe(control.value))
-                    if limite > 0:
-                        if db.agregar_presupuesto(categoria, limite):
-                            actualizar_vista()
-                            page.show_snack_bar(
-                                ft.SnackBar(content=ft.Text(f"✅ Límite de {categoria} guardado"), bgcolor="green")
-                            )
-                        else:
-                            page.show_snack_bar(ft.SnackBar(
-                                content=ft.Text("No se pudo guardar el límite. Inténtalo nuevamente."),
-                                bgcolor="red",
-                            ))
-                    else:
-                        page.show_snack_bar(ft.SnackBar(
-                            content=ft.Text("El límite debe ser mayor que cero."), bgcolor="red"
-                        ))
-                except:
-                    page.show_snack_bar(
-                        ft.SnackBar(content=ft.Text("❌ Ingresa un número válido"), bgcolor="red")
-                    )
-                break
+    def guardar_presupuesto_cat(e, categoria, campo):
+        """Guarda el límite usando la referencia directa al campo del formulario."""
+        texto_limite = normalizar_texto_importe(campo.value)
+        try:
+            limite = float(texto_limite)
+        except (TypeError, ValueError):
+            campo.error_text = "Ingresa un monto válido."
+            campo.update()
+            return
+
+        if limite <= 0:
+            campo.error_text = "El límite debe ser mayor que cero."
+            campo.update()
+            return
+
+        campo.error_text = None
+        if not db.agregar_presupuesto(categoria, limite):
+            page.show_snack_bar(ft.SnackBar(
+                content=ft.Text("No se pudo guardar el límite. Inténtalo nuevamente."), bgcolor="red"
+            ))
+            return
+
+        # Actualizar el resumen y reconstruir la vista deja navegación y lista en
+        # un estado fresco después de guardar, también al volver desde otra sección.
+        actualizar_vista()
+        page.show_snack_bar(ft.SnackBar(
+            content=ft.Text(f"✅ Límite de {categoria} guardado"), bgcolor="green"
+        ))
     
     # =====================================================
     # VISTA DE TRANSFERENCIAS
@@ -3926,7 +3929,7 @@ def main(page: ft.Page):
     opciones_navegacion = [
         ("inicio", "home", "Inicio"),
         ("balance", "receipt_long", "Balance"),
-        ("presupuestos", "pie_chart", "Presupuestos"),
+        ("presupuestos", "pie_chart", "Control de gastos"),
         ("ahorros", "savings", "Ahorros"),
         ("suscripciones", "subscriptions", "Suscripciones"),
         ("prestamos", "account_balance", "Préstamos"),

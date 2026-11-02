@@ -40,7 +40,7 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center_vertical"
-            android:text="Semana\n$0"
+            android:text="Disponible\n$0"
             android:textColor="#FFFFB454"
             android:textSize="11sp"
             android:maxLines="2"
