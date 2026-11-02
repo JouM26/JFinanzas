@@ -30,6 +30,13 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
         }
     }
 
+    override fun onReceive(context: Context, intent: Intent) {
+        super.onReceive(context, intent)
+        if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+            requestRefresh(context)
+        }
+    }
+
     override fun onUpdate(
         context: Context,
         manager: AppWidgetManager,
@@ -76,6 +83,7 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
     }
 
     private fun loadTotals(context: Context): DoubleArray {
+        registeredDatabaseFile(context)?.let { return loadTotalsFromFile(it) }
         val canonical = File(context.filesDir, "app_flutter/finanzas.db")
         val candidates = linkedSetOf(
             canonical,
@@ -106,6 +114,20 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
         )?.first ?: return DoubleArray(5)
 
         return loadTotalsFromFile(file)
+    }
+
+    private fun registeredDatabaseFile(context: Context): File? {
+        val marker = try {
+            context.filesDir.walkTopDown().maxDepth(8)
+                .firstOrNull { it.isFile && it.name == "jfinanzas_db_path.txt" }
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        return try {
+            File(marker.readText().trim()).takeIf { it.isFile }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun loadTotalsFromFile(file: File): DoubleArray {

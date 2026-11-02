@@ -150,6 +150,15 @@ def get_persistent_db_path():
                     with sqlite3.connect(str(temporal), timeout=10) as destino:
                         fuente.backup(destino)
                 temporal.replace(db_path)
+
+            # Los widgets nativos leen esta referencia para usar la base
+            # elegida por Flet, sin tener que adivinar entre copias.
+            try:
+                db_path.with_name("jfinanzas_db_path.txt").write_text(
+                    str(db_path.resolve()), encoding="utf-8"
+                )
+            except OSError:
+                pass
             return str(db_path)
         
         sistema = platform.system().lower()

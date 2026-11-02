@@ -411,6 +411,7 @@ class QuickEntryActivity : Activity() {
         // app tras actualizar), se deja que la migración de Python importe la
         // base antigua en el siguiente inicio.
         val canonical = File(filesDir, "app_flutter/finanzas.db")
+        registeredDatabaseFile()?.let { return it }
         val possibleFiles = linkedSetOf(
             canonical,
             File(filesDir, "data/finanzas.db"),
@@ -454,6 +455,20 @@ class QuickEntryActivity : Activity() {
             compareBy<Triple<File, Long, Long>> { it.second }
                 .thenBy { it.third }
         )?.first ?: canonical
+    }
+
+    private fun registeredDatabaseFile(): File? {
+        val marker = try {
+            filesDir.walkTopDown().maxDepth(8)
+                .firstOrNull { it.isFile && it.name == "jfinanzas_db_path.txt" }
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        return try {
+            File(marker.readText().trim()).takeIf { it.isFile }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun countRows(database: SQLiteDatabase, table: String, condition: String = ""): Int {
