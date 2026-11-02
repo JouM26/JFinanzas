@@ -93,7 +93,7 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
             File(context.filesDir, "flet/py/finanzas.db"),
         )
         try {
-            context.filesDir.walkTopDown().maxDepth(7).filter {
+            (context.filesDir.parentFile ?: context.filesDir).walkTopDown().maxDepth(9).filter {
                 it.isFile && it.name == "finanzas.db"
             }.forEach { candidates.add(it) }
         } catch (_: Exception) { }
@@ -101,11 +101,7 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
         val mejores = candidates.filter { it.isFile }.mapNotNull { candidate ->
             try {
                 SQLiteDatabase.openDatabase(candidate.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-                    val score = countRows(db, "movimientos") * 1_000L +
-                        countRows(db, "cuentas_bancarias", "activa = 1") * 100L +
-                        countRows(db, "creditos") * 20L + countRows(db, "ahorros") * 10L +
-                        countRows(db, "presupuestos") * 5L + countRows(db, "transferencias") * 5L
-                    Triple(candidate, score, candidate.lastModified())
+                    Triple(candidate, databaseScore(db), candidate.lastModified())
                 }
             } catch (_: Exception) { null }
         }
@@ -118,17 +114,27 @@ class FinanceSummaryWidgetProvider : AppWidgetProvider() {
 
     private fun registeredDatabaseFile(context: Context): File? {
         val marker = try {
-            context.filesDir.walkTopDown().maxDepth(8)
+            (context.filesDir.parentFile ?: context.filesDir).walkTopDown().maxDepth(9)
                 .firstOrNull { it.isFile && it.name == "jfinanzas_db_path.txt" }
         } catch (_: Exception) {
             null
         } ?: return null
         return try {
-            File(marker.readText().trim()).takeIf { it.isFile }
+            val file = File(marker.readText().trim()).takeIf { it.isFile } ?: return null
+            val score = SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use {
+                databaseScore(it)
+            }
+            file.takeIf { score > 0L }
         } catch (_: Exception) {
             null
         }
     }
+
+    private fun databaseScore(db: SQLiteDatabase): Long =
+        countRows(db, "movimientos") * 1_000L +
+            countRows(db, "cuentas_bancarias", "activa = 1") * 100L +
+            countRows(db, "creditos") * 20L + countRows(db, "ahorros") * 10L +
+            countRows(db, "presupuestos") * 5L + countRows(db, "transferencias") * 5L
 
     private fun loadTotalsFromFile(file: File): DoubleArray {
         return try {

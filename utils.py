@@ -110,6 +110,7 @@ def get_persistent_db_path():
             candidatos = [
                 pathlib.Path.cwd() / "finanzas.db",
                 pathlib.Path.cwd() / "data" / "finanzas.db",
+                data_dir.parent / "app_flutter" / "finanzas.db",
                 data_dir.parent / "data" / "finanzas.db",
                 data_dir.parent / "flet" / "app" / "finanzas.db",
                 data_dir.parent / "flet" / "py" / "data" / "finanzas.db",

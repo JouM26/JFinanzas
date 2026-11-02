@@ -432,7 +432,7 @@ class QuickEntryActivity : Activity() {
                 }
             }
         }
-        findDatabases(filesDir, 7)
+        findDatabases(filesDir.parentFile ?: filesDir, 8)
         val existing = possibleFiles.filter { it.isFile }.mapNotNull { file ->
             try {
                 val db = SQLiteDatabase.openDatabase(
@@ -440,12 +440,7 @@ class QuickEntryActivity : Activity() {
                     null,
                     SQLiteDatabase.OPEN_READONLY
                 )
-                val score = db.use {
-                    countRows(it, "movimientos") * 1_000L +
-                        countRows(it, "cuentas_bancarias", "activa = 1") * 100L +
-                        countRows(it, "creditos") * 20L + countRows(it, "ahorros") * 10L +
-                        countRows(it, "presupuestos") * 5L + countRows(it, "transferencias") * 5L
-                }
+                val score = db.use { databaseScore(it) }
                 Triple(file, score, file.lastModified())
             } catch (_: Exception) {
                 null
@@ -459,17 +454,27 @@ class QuickEntryActivity : Activity() {
 
     private fun registeredDatabaseFile(): File? {
         val marker = try {
-            filesDir.walkTopDown().maxDepth(8)
+            (filesDir.parentFile ?: filesDir).walkTopDown().maxDepth(9)
                 .firstOrNull { it.isFile && it.name == "jfinanzas_db_path.txt" }
         } catch (_: Exception) {
             null
         } ?: return null
         return try {
-            File(marker.readText().trim()).takeIf { it.isFile }
+            val file = File(marker.readText().trim()).takeIf { it.isFile } ?: return null
+            val score = SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use {
+                databaseScore(it)
+            }
+            file.takeIf { score > 0L }
         } catch (_: Exception) {
             null
         }
     }
+
+    private fun databaseScore(database: SQLiteDatabase): Long =
+        countRows(database, "movimientos") * 1_000L +
+            countRows(database, "cuentas_bancarias", "activa = 1") * 100L +
+            countRows(database, "creditos") * 20L + countRows(database, "ahorros") * 10L +
+            countRows(database, "presupuestos") * 5L + countRows(database, "transferencias") * 5L
 
     private fun countRows(database: SQLiteDatabase, table: String, condition: String = ""): Int {
         val exists = database.rawQuery(
